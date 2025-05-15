@@ -19,3 +19,10 @@ class conversation(db.Model):
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
     user_input = db.Column(db.Text, nullable=False)
     bot_response = db.Column(db.Text, nullable=False)
+
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+
+    app.run(debug=True)
