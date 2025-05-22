@@ -6,8 +6,17 @@ app = Flask(__name__)
 @app.route('/', methods=['GET'])
 def user_input():
     return jsonify({
-        'message': 'Hello, this is a flask API!'
+        'message': 'Your assistant is up and running!'
     })
+
+
+@app.route('/webhook', methods=['POST'])
+def sendMessage():
+    data = request.get_json()
+    to_number = data.get('to_number')
+    body_text = data.get('body_text')
+
+    
 
 
 if __name__ == '__main__':
