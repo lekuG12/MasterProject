@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 
+from 
+
 
 app = Flask(__name__)
 
@@ -16,7 +18,10 @@ def sendMessage():
     to_number = data.get('to_number')
     body_text = data.get('body_text')
 
-    
+    # Here you would call your Twilio function to send the message
+    # For example:
+
+
 
 
 if __name__ == '__main__':
