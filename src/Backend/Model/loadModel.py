@@ -10,3 +10,8 @@ tokenizer = AutoTokenizer.from_pretrained(
     gpt_model,
     use_auth_token=hf_token
 )
+
+model = AutoModelForCausalLM.from_pretrained(
+    gpt_model,
+    use_auth_token=hf_token
+)

@@ -1,7 +1,16 @@
 import logging
+import os
 
 from twilio.rest import Client
 from decouple import config
+
+
+twilio_client = Client(
+    os.getenv("TWILIO_ACCOUNT_SID"),
+    os.getenv("TWILIO_AUTH_TOKEN")
+)
+
+twilio_whatsapp = os.getenv('TWILIO_NUMBER')
 
 account_sid = config("TWILIO_ACCOUNT_SID")
 auth_token = config("TWILIO_AUTH_TOKEN")
