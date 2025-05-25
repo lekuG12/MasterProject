@@ -61,6 +61,7 @@ class TwilioClient:
 
 twilio_client = TwilioClient()
 
-def send_message(to_number, body_text):
+def send_message(to_number, body_text, message_type='whatsapp'):
     """Send message - main interface function"""
-    return twilio_client.send_whatsapp_message(to_number, body_text)
+    if message_type.lower() == 'whatsapp':
+        return twilio_client.send_whatsapp_message(to_number, body_text)

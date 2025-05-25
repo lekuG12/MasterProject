@@ -10,7 +10,7 @@ from threading import Lock
 logger = logging.getLogger(__name__)
 
 
-class Model:
+class AiModel:
     def __init__(self):
         self.tokenizer = None
         self.model = None
@@ -137,7 +137,7 @@ class Model:
 
 
 
-ai_model = Model()
+ai_model = AiModel()
 
 def initialize_model():
     """Initialize the AI model"""
