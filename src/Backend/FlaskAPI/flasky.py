@@ -1,12 +1,25 @@
 from flask import Flask, request, jsonify
+import re
+import logging
+from datetime import datetime
 from twilioM.nurseTalk import sendMessage
 from Backend.database.data import db, conversation
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///nurse_talk.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+
 db.init_app(app)
+
+def generate_response(user_input, phone_number):
+    lower_input = user_input.lower()
+
+    
 
 
 @app.route('/webhook', methods=['POST'])
