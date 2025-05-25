@@ -23,21 +23,21 @@ def send_message():
     if not to_number or not body_text:
         return jsonify({'status': 'error', 'message': 'Missing required fields!'}), 400
 
-    # Here you would call your Twilio function to send the message
-    # For example:
     try:
-        sendMessage(to_number, body_text)
+        message = sendMessage(to_number, body_text)
+
+        new_conversation  = conversation(
+            phone_number=to_number,
+            user_input='webhook_message'
+            bot_response=body_text
+        )
+
+        db.session.add(new_conversation)
+        db.session.commit()
+
         return jsonify({'status': 'success', 'message': 'Message sent successfully!'}), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
-    
-@app.route('/webhook', methods=['GET'])
-def get_message():
-    # This is a placeholder for the GET request
-    # You can implement your logic here
-    return jsonify({'status': 'success', 'message': 'GET request received!'}), 200
-
-
 
 
 if __name__ == '__main__':

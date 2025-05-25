@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 
 def sendMessage(to_number, body_text):
     try:
-        message = Client.messages.create(
-            from_='WhatsAPP: {}'.format(twilio_number),
+        message = client.messages.create(
+            from_=f'whatsapp:{twilio_number}',
             body=body_text,
-            to='WhatsAPP: {}'.format(to_number)
+            to=f'whatsapp:{to_number}'
         )
-
-        logger.info('Message sent to {}: {}'.format(to_number, message.body))
-
+        logger.info(f'Message sent to {to_number}: {message.body}')
+        return message
     except Exception as e:
-        logger.error('Error sending message to {}: {}'.format(to_number, e))
+        logger.error(f'Error sending message to {to_number}: {str(e)}')
+        raise e
