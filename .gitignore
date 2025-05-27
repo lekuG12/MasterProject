@@ -7,7 +7,5 @@
 /instance
 *.env
 .env
-D:/Smoke_IT/MasterProject/src/nurse_talk_app.egg-info
-src/nurse_talk_app.egg-info/dependency_links.txt
-src/nurse_talk_app.egg-info/PKG-INFO
+nurse_talk_app.egg-info
 src/Backend/database/__pycache__
