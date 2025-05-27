@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 
 from Backend.database.data import db, init_database, save_conversation, get_conversation_history
-from Model.loadModel import initialize_model, get_ai_response
+from Backend.Model.loadModel import initialize_model, get_ai_response
 from twilioM.nurseTalk import send_message
 
 logging.basicConfig(
