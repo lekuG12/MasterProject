@@ -14,7 +14,7 @@ class AiModel:
         self.model = None
         self.model_lock = Lock()
         self.is_loaded = False
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         self.generation_config = None
 
     def load_model(self):
@@ -27,15 +27,18 @@ class AiModel:
             
             logger.info(f"Loading model: {gpt_model} on {self.device}")
 
-            # Load tokenizer
+            # Load tokenizer with position embedding handling
             self.tokenizer = AutoTokenizer.from_pretrained(
                 gpt_model,
                 use_auth_token=hf_token,
-                padding_side="left"
+                padding_side="left",
+                model_max_length=1024  # Add this line
             )
             
+            # Ensure pad token is set
             if not self.tokenizer.pad_token:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
             # Load model with device management
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -63,38 +66,43 @@ class AiModel:
 
     def generate_response(self, user_input, conversation_history=None, max_new_tokens=512):
         if not self.is_loaded:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+            logger.error("Model not loaded")
+            return "I'm currently initializing. Please try again in a moment.", 0
         
         start_time = time.time()
-        logger.debug(f"Generating response for: {user_input[:50]}...")
+        logger.info(f"Starting response generation for input: {user_input[:50]}...")
 
         try:
             with self.model_lock:
                 # Build context with token length awareness
                 context = self._build_context(user_input, conversation_history, max_tokens=1024)
+                logger.debug(f"Built context: {context[:100]}...")
                 
-                # Tokenize with truncation
+                # Tokenize with proper position handling
                 inputs = self.tokenizer(
                     context,
                     return_tensors='pt',
                     truncation=True,
-                    max_length=1024
+                    max_length=1024,
+                    padding=True,
+                    add_special_tokens=True
                 ).to(self.device)
                 
-                logger.debug(f"Input token length: {inputs.input_ids.shape[1]}")
+                logger.info(f"Input tensor shape: {inputs.input_ids.shape}, Generating response...")
                 
-                # Create generation config for this request
-                gen_config = self.generation_config
-                gen_config.max_new_tokens = min(max_new_tokens, 1024)
-                
-                # Generate response
-                with torch.inference_mode():
-                    outputs = self.model.generate(
-                        input_ids=inputs.input_ids,
-                        attention_mask=inputs.attention_mask,
-                        generation_config=gen_config
-                    )
-                
+                # Generate with position handling
+                outputs = self.model.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    max_new_tokens=min(max_new_tokens, 512),
+                    min_length=1,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    use_cache=True
+                )
+            
                 # Extract ONLY the generated portion (after context)
                 generated_tokens = outputs[0][inputs.input_ids.shape[1]:]
                 response = self.tokenizer.decode(
@@ -113,36 +121,49 @@ class AiModel:
             torch.cuda.empty_cache()
             return self._fallback_response(user_input), time.time() - start_time
             
+        except IndexError as e:
+            if "index out of range in self" in str(e):
+                logger.error("Position embedding index error - reducing context size")
+                # Retry with smaller context
+                return self.generate_response(user_input, None, max_new_tokens=256)
+            raise
         except Exception as e:
             logger.exception("Error generating response")
             return self._fallback_response(user_input), time.time() - start_time
 
     def _build_context(self, user_input, conversation_history, max_tokens=1024):
-        """Build conversation context with token limit awareness"""
-        context = "You are a helpful healthcare assistant. Provide concise, professional responses.\n\n"
-        token_count = len(self.tokenizer.encode(context))
+        """Build conversation context with strict token limit awareness"""
+        # Initialize history_text at the start
+        history_text = ""
         
-        # Add conversation history in reverse order (newest first)
-        if conversation_history:
-            history_text = ""
-            for conv in reversed(conversation_history[-5:]):  # Last 5 conversations
+        context = "You are a helpful healthcare assistant. Provide concise, professional responses.\n\n"
+        
+        # Reserve tokens for the current user input and system prompt
+        user_tokens = len(self.tokenizer.encode(user_input))
+        system_tokens = len(self.tokenizer.encode(context))
+        available_tokens = max_tokens - user_tokens - system_tokens - 50  # 50 token buffer
+        
+        if available_tokens <= 0:
+            logger.warning("Input too long, truncating context")
+            return f"{context}Patient: {user_input[:512]}...\nNurse:"
+        
+        # Add conversation history with strict token counting
+        if conversation_history and len(conversation_history) > 0:
+            for conv in reversed(conversation_history[-3:]):  # Last 3 conversations
                 conv_str = f"Patient: {conv['user_input']}\nNurse: {conv['bot_response']}\n\n"
-                new_tokens = len(self.tokenizer.encode(conv_str))
+                conv_tokens = len(self.tokenizer.encode(conv_str))
                 
-                # Stop if adding this would exceed token limit
-                if token_count + new_tokens > max_tokens:
+                if available_tokens - conv_tokens <= 0:
                     break
                     
                 history_text = conv_str + history_text
-                token_count += new_tokens
-            
-            context += history_text
-        
-        # Add current user input
-        user_str = f"Patient: {user_input}\nNurse:"
-        context += user_str
-        
-        return context
+                available_tokens -= conv_tokens
+    
+        # Combine all parts of the context
+        final_context = context + history_text + f"Patient: {user_input}\nNurse:"
+    
+        logger.debug(f"Built context with {len(self.tokenizer.encode(final_context))} tokens")
+        return final_context
     
     def _clean_response(self, response):
         """Clean and format the AI response"""
