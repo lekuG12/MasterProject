@@ -9,3 +9,5 @@
 .env
 nurse_talk_app.egg-info
 src/Backend/database/__pycache__
+*.mp3
+*.gitignore
