@@ -30,49 +30,71 @@ init_database(app)
 initialize_model()
 
 def clean_response(text):
-    """Clean up the AI response and format it as a structured diagnosis with first aid"""
+    """Clean up the AI response with clear diagnosis and first aid steps"""
     # Remove [augmented] tags and clean initial text
     text = re.sub(r'\[augmented\]', '', text)
-    text = re.sub(r'Assessment:\s*Assessment:', 'Assessment:', text)
     
-    # Split into assessment and first aid parts
-    parts = text.split('First Aid:', 1)
-    diagnosis = parts[0].replace('Assessment:', '').strip()
+    # Extract diagnosis more accurately
+    diagnosis_match = re.search(r'(?:Assessment:|Diagnosis:)\s*([^.!?\n]+)', text, re.IGNORECASE)
+    diagnosis = ""
+    if diagnosis_match:
+        diagnosis = diagnosis_match.group(1).strip()
+        # Clean up diagnosis
+        diagnosis = re.sub(r'(?:Assessment:|Diagnosis:)', '', diagnosis)
+        diagnosis = re.sub(r'ptoms:|symptoms:', '', diagnosis, flags=re.IGNORECASE)
     
-    # Handle first aid section
-    first_aid = ""
-    if len(parts) > 1:
-        first_aid = parts[1].strip()
-        # Remove duplicate instructions
-        first_aid = re.sub(r'(?:First Aid:)?\s*(.*?)(?=First Aid:|$)', r'\1', first_aid)
-        first_aid = '. '.join(dict.fromkeys(
-            [x.strip() for x in first_aid.split('.') if x.strip()]
-        ))
+    # Extract first aid steps
+    first_aid_steps = []
+    emergency_step = None
+    if 'First Aid:' in text:
+        first_aid_sections = text.split('First Aid:')[1:]
+        seen_steps = set()
+        
+        for section in first_aid_sections:
+            steps = [s.strip() for s in re.split(r'[.;]\s*', section) if s.strip()]
+            
+            for step in steps:
+                step_lower = step.lower()
+                # Identify emergency steps
+                if any(term in step_lower for term in ['emergency', 'urgent', 'call emergency', 'immediate']):
+                    emergency_step = "Seek immediate medical attention"
+                    continue
+                
+                # Filter out garbage and duplicates
+                if (not any(x in step_lower for x in ['ptoms:', 'symptoms:', 'netmessage', 'first aid:', 'assessment:']) and
+                    step_lower not in seen_steps and
+                    len(step) > 3):
+                    
+                    # Clean up the step
+                    clean_step = step.strip('., ')
+                    if clean_step and clean_step.lower() not in seen_steps:
+                        first_aid_steps.append(f"• {clean_step}")
+                        seen_steps.add(clean_step.lower())
     
-    # Format response in a clear structure
-    cleaned_text = f"*Assessment*: {diagnosis}"
+    # Build the response with proper formatting
+    cleaned_text = "*Diagnosis*:\n"
+    cleaned_text += diagnosis if diagnosis else "Pending medical assessment"
     
-    if first_aid:
-        cleaned_text += f"\n\n*First Aid Steps*:\n{first_aid}"
+    if first_aid_steps:
+        cleaned_text += "\n\n*First Aid Steps*:\n"
+        cleaned_text += "\n".join(first_aid_steps)
+        # Add emergency step at the end if present
+        if emergency_step:
+            cleaned_text += f"\n• {emergency_step}"
     
-    # Add emergency warning if needed
-    if any(word in cleaned_text.lower() for word in ['urgent', 'emergency', 'immediate']):
-        cleaned_text += "\n\n⚠️ EMERGENCY: Please seek immediate medical attention!"
-    
-    # Remove repetitive phrases and clean up
-    cleaned_text = re.sub(r'([^.]+)(\. \1)+', r'\1', cleaned_text)
-    cleaned_text = re.sub(r'(5 min\.?\s*)+', '5 min. ', cleaned_text)
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    # Add emergency warning only if emergency step present
+    if emergency_step:
+        cleaned_text += "\n\n⚠️ *URGENT*: Immediate medical attention required!"
     
     return cleaned_text
 
 def add_conversational_elements(response):
-    """Add conversational elements after the structured response"""
+    """Add a single follow-up question after the medical advice"""
     follow_ups = [
-        "\n\nHow are these symptoms affecting you?",
-        "\n\nHave you tried any of these steps before?",
-        "\n\nWould you like me to explain any of these steps in more detail?",
-        "\n\nIs there anything specific you're concerned about?"
+        "\n\nHow long has your child been experiencing these symptoms?",
+        "\n\nHas your child been feeding normally?",
+        "\n\nWhat temperature readings have you observed?",
+        "\n\nHave you tried any remedies so far?"
     ]
     return f"{response}{random.choice(follow_ups)}"
 
