@@ -31,6 +31,13 @@ app.config['TWILIO_ACCOUNT_SID'] = config('TWILIO_ACCOUNT_SID')  # Add this
 app.config['STATIC_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 app.config['TEMP_FOLDER'] = os.path.join(app.config['STATIC_FOLDER'], 'temp')
 
+# Add after existing app.config settings
+app.config.update(
+    MAX_AUDIO_SIZE=16 * 1024 * 1024,  # 16MB max size
+    ALLOWED_AUDIO_TYPES=['audio/ogg', 'audio/mpeg', 'audio/mp3', 'audio/wav'],
+    AUDIO_CONVERSION_ENABLED=True
+)
+
 # Initialize Twilio client for direct audio sending
 twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH_TOKEN'])
 
@@ -148,18 +155,62 @@ def whatsapp_webhook():
 
         if num_media > 0 and request.form.get('MediaContentType0', '').startswith('audio/'):
             # Handle audio input
-            media_url = request.form.get('MediaUrl0')
-            audio_extension = request.form.get('MediaContentType0').split('/')[-1]
-            temp_audio_path = os.path.join(app.config['STATIC_FOLDER'], 'temp', 
-                                         f"input_{int(time.time())}.{audio_extension}")
-            
-            os.makedirs(os.path.dirname(temp_audio_path), exist_ok=True)
-            
-            # Download and transcribe audio
-            if tts_service.download_audio_from_url(media_url, temp_audio_path):
+            try:
+                media_url = request.form.get('MediaUrl0')
+                content_type = request.form.get('MediaContentType0')
+                
+                if not media_url:
+                    logger.error("No media URL provided")
+                    return generate_twiml_response("Audio message received but no media URL found")
+                    
+                if content_type not in app.config['ALLOWED_AUDIO_TYPES']:
+                    logger.error(f"Unsupported audio type: {content_type}")
+                    return generate_twiml_response("Sorry, this audio format is not supported")
+                
+                # Generate unique filename with timestamp
+                audio_extension = content_type.split('/')[-1]
+                timestamp = int(time.time())
+                temp_audio_path = os.path.join(
+                    app.config['TEMP_FOLDER'],
+                    f"input_{timestamp}_{random.randint(1000, 9999)}.{audio_extension}"
+                )
+                
+                logger.info(f"Downloading audio from {media_url} to {temp_audio_path}")
+                
+                # Ensure temp directory exists
+                os.makedirs(os.path.dirname(temp_audio_path), exist_ok=True)
+                
+                # Download and process audio
+                if not tts_service.download_audio_from_url(media_url, temp_audio_path):
+                    logger.error("Failed to download audio file")
+                    return generate_twiml_response("Sorry, couldn't download your audio message")
+                
+                # Verify file was downloaded and has content
+                if not os.path.exists(temp_audio_path) or os.path.getsize(temp_audio_path) == 0:
+                    logger.error("Downloaded audio file is empty or missing")
+                    return generate_twiml_response("Sorry, there was an issue with your audio message")
+                    
+                logger.info("Transcribing audio file")
                 user_input = tts_service.transcribe_audio(temp_audio_path)
+                
+                if not user_input:
+                    logger.error("Audio transcription failed")
+                    return generate_twiml_response("Sorry, I couldn't understand the audio. Please try again or send a text message")
+                    
+                logger.info(f"Successfully transcribed audio to: {user_input}")
+                
+            except Exception as e:
+                logger.error(f"Error processing audio: {str(e)}", exc_info=True)
+                return generate_twiml_response("Sorry, there was an error processing your audio message")
+            
+            finally:
                 # Clean up temporary file
-                os.remove(temp_audio_path)
+                if os.path.exists(temp_audio_path):
+                    try:
+                        os.remove(temp_audio_path)
+                        logger.info(f"Cleaned up temporary file: {temp_audio_path}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning up temp file: {str(e)}")
         else:
             # Handle text input
             user_input = request.form.get('Body', '').strip()
