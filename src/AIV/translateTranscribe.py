@@ -2,6 +2,57 @@ from gtts import gTTS
 from pydub import AudioSegment
 import speech_recognition as sr
 import os
+import uuid
+import time
+
+class TTSService:
+    def __init__(self, static_dir=None):
+        self.static_dir = static_dir or os.path.join(os.path.dirname(__file__), '..', 'Backend', 'FlaskAPI', 'static', 'audio')
+        os.makedirs(self.static_dir, exist_ok=True)
+
+    def generate_speech(self, text, phone_number=None):
+        """
+        Generate speech from text and save as audio file
+        Returns: filename of the generated audio
+        """
+        try:
+            # Create unique filename using phone number if provided
+            filename = f"response_{phone_number.split(':')[-1]}_{uuid.uuid4().hex[:8]}.mp3"
+            file_path = os.path.join(self.static_dir, filename)
+
+            # Generate MP3 using gTTS
+            tts = gTTS(text=text, lang='en', slow=False)
+            tts.save(file_path)
+
+            # Convert to proper format and optimize
+            audio = AudioSegment.from_mp3(file_path)
+            
+            # Normalize audio levels
+            normalized_audio = audio.normalize()
+            
+            # Export with optimized settings
+            normalized_audio.export(
+                file_path,
+                format="mp3",
+                parameters=["-q:a", "0", "-b:a", "128k"]
+            )
+
+            return filename
+
+        except Exception as e:
+            print(f"Error generating speech: {e}")
+            return None
+
+    def clean_old_files(self, max_age_hours=24):
+        """Clean up old audio files"""
+        try:
+            current_time = time.time()
+            for filename in os.listdir(self.static_dir):
+                file_path = os.path.join(self.static_dir, filename)
+                if os.path.getmtime(file_path) < (current_time - max_age_hours * 3600):
+                    os.remove(file_path)
+        except Exception as e:
+            print(f"Error cleaning old files: {e}")
 
 class SpeechConverter:
     def __init__(self, temp_dir="temp_audio"):

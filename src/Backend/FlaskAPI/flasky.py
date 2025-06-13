@@ -37,7 +37,7 @@ twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH
 init_database(app)
 initialize_model()
 
-# Initialize services
+# Initialize TTS service
 tts_service = TTSService()
 
 def clean_response(text):
@@ -144,58 +144,37 @@ def whatsapp_webhook():
         if not user_input:
             return generate_twiml_response("Missing message content")
 
-        # Get and process AI response
+        # Get AI response
         bot_response, response_time = get_ai_response(user_input, get_conversation_history(from_number))
         cleaned_response = clean_response(bot_response)
         final_response = add_conversational_elements(cleaned_response)
 
-        # First send the text response via external_send_message
-        send_result = external_send_message(
-            to_number=from_number,
-            body_text=final_response,
-            message_type='whatsapp'
-        )
-
-        if not send_result.get('success'):
-            logger.error(f"Failed to send text message: {send_result.get('error')}")
-            return generate_twiml_response("Failed to send message")
-
-        # Try to generate and send audio
-        try:
-            audio_filename = tts_service.generate_speech(final_response, from_number)
-            if audio_filename:
-                # Construct the full audio URL - this is the key fix
-                audio_url = f"https://d242-102-244-33-70.ngrok-free.app/audio/{audio_filename}"
-                logger.info(f"Generated audio file: {audio_filename}")
-                logger.info(f"Audio URL: {audio_url}")
-                
-                # Wait a bit to ensure file is fully written
-                time.sleep(1)
-                
-                # Verify the file exists and get its size
-                audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
-                if os.path.exists(audio_path):
-                    file_size = os.path.getsize(audio_path)
-                    logger.info(f"Audio file size: {file_size} bytes")
-                    
-                    # Send audio using direct Twilio client instead of external function
-                    if send_whatsapp_audio(from_number, audio_url):
-                        status = 'sent_with_audio'
-                        logger.info("Audio message sent successfully")
-                    else:
-                        status = 'sent_text_only'
-                        logger.error("Failed to send audio message")
-                else:
-                    logger.error(f"Audio file not found after generation: {audio_path}")
-                    status = 'sent_text_only'
-            else:
-                status = 'sent_text_only'
-                logger.warning("Audio file generation failed")
-        except Exception as e:
-            logger.error(f"Audio generation failed: {e}")
+        # Generate audio before sending response
+        audio_filename = tts_service.generate_speech(final_response, from_number)
+        
+        if audio_filename:
+            # Construct the public URL for the audio file
+            audio_url = f"https://d242-102-244-33-70.ngrok-free.app/audio/{audio_filename}"
+            
+            # Send message with audio
+            send_result = external_send_message(
+                to_number=from_number,
+                body_text=final_response,
+                media_url=audio_url,
+                message_type='whatsapp'
+            )
+            
+            status = 'sent_with_audio' if send_result.get('success') else 'failed'
+        else:
+            # Fallback to text-only
+            send_result = external_send_message(
+                to_number=from_number,
+                body_text=final_response,
+                message_type='whatsapp'
+            )
             status = 'sent_text_only'
 
-        # Save conversation with final status
+        # Save conversation
         save_conversation(
             phone_number=from_number,
             user_input=user_input,
