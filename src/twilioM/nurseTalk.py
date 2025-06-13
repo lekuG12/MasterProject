@@ -113,8 +113,21 @@ class TwilioClient:
 # Global instance
 twilio_client = TwilioClient()
 
-def send_message(to_number, body_text, message_type='whatsapp'):
-    if message_type.lower() == 'whatsapp':
-        return twilio_client.send_whatsapp_message(to_number, body_text)
-    else:
-        raise ValueError(f"Unsupported message type: {message_type}")
+def send_message(to_number, body_text, media_url=None, message_type='whatsapp'):
+    """Send a WhatsApp message via Twilio with optional media"""
+    try:
+        message_data = {
+            'from_': f'{message_type}:{twilio_client.twilio_number}',
+            'to': to_number,
+            'body': body_text
+        }
+        
+        if media_url:
+            message_data['media_url'] = [media_url]
+            
+        message = twilio_client.client.messages.create(**message_data)
+        return {'success': True, 'sid': message.sid}
+        
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
+        return {'success': False, 'error': str(e)}

@@ -1,11 +1,13 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 import re
 import logging
 from datetime import datetime
+import os
 import time
 import random
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client
 from decouple import config
 
 from Backend.database.data import db, init_database, save_conversation, get_conversation_history
@@ -13,6 +15,7 @@ from Backend.Model.loadModel import initialize_model, get_ai_response
 from Backend.Model.response_handler import clean_response, add_conversational_elements
 from Backend.Model.conversation_state import ConversationState, get_conversation_state, update_conversation_state
 from twilioM.nurseTalk import send_message as external_send_message
+from AIV.translateTranscribe import TTSService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,18 +26,26 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///nurse_talk.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['TWILIO_AUTH_TOKEN'] = config('TWILIO_AUTH_TOKEN')  # Load from .env
+app.config['TWILIO_AUTH_TOKEN'] = config('TWILIO_AUTH_TOKEN')
+app.config['TWILIO_ACCOUNT_SID'] = config('TWILIO_ACCOUNT_SID')  # Add this
+app.config['STATIC_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+
+# Initialize Twilio client for direct audio sending
+twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH_TOKEN'])
 
 # Initialize components
 init_database(app)
 initialize_model()
+
+# Initialize services
+tts_service = TTSService()
 
 def clean_response(text):
     """Clean up the AI response with clear diagnosis and first aid steps"""
     # Remove [augmented] tags and clean initial text
     text = re.sub(r'\[augmented\]', '', text)
     
-    # Extract diagnosis more accurately
+    # Extract
     diagnosis_match = re.search(r'(?:Assessment:|Diagnosis:)\s*([^.!?\n]+)', text, re.IGNORECASE)
     diagnosis = ""
     if diagnosis_match:
@@ -98,104 +109,156 @@ def add_conversational_elements(response):
     ]
     return f"{response}{random.choice(follow_ups)}"
 
+def send_whatsapp_audio(to_number, audio_url):
+    """Send audio message directly using Twilio client"""
+    try:
+        message = twilio_client.messages.create(
+            from_='whatsapp:+14155238886',  # Your Twilio WhatsApp number
+            to=to_number,
+            media_url=[audio_url],
+            body=""  # Empty body for audio-only message
+        )
+        logger.info(f"Audio message sent successfully: {message.sid}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send audio message: {e}")
+        return False
+
 @app.route('/webhook', methods=['POST'])
 def whatsapp_webhook():
-    logger.info(f"Incoming request: {request.form}")
-    start_time = time.time()
-    
+    """Handle incoming WhatsApp messages"""
+    logger.info("Received webhook request")
     try:
-        from_number = request.form.get('From', '').replace('whatsapp:', '')
-        user_input = request.form.get('Body', '').strip()
-        
-        if not from_number or not user_input:
-            logger.warning("Missing From/Body in request")
-            return _generate_twiml_response("Missing required fields")
-        
-        # Get current conversation state and handle greeting
-        current_state = get_conversation_state(from_number)
-        if current_state == ConversationState.GREETING:
-            if any(greeting in user_input.lower() for greeting in ['hi', 'hello', 'hey']):
-                update_conversation_state(from_number, ConversationState.COLLECTING_INFO)
-                return _generate_twiml_response("Hello! I'm your virtual health assistant. How can I help you today?")
-        
-        # Get AI response with context
-        conversation_history = get_conversation_history(from_number, limit=5)
-        try:
-            bot_response, response_time = get_ai_response(user_input, conversation_history)
-        except Exception as ai_error:
-            logger.error(f"AI model error: {str(ai_error)}")
-            bot_response = "I'm having technical difficulties. A nurse will contact you shortly."
-            response_time = 0
-
-        # Validate and clean response
-        if not bot_response or len(bot_response.strip()) == 0:
-            logger.error("Empty response generated from AI model")
-            bot_response = "I apologize, but I couldn't generate a proper response. A nurse will be notified."
-            response_time = 0
-        else:
-            bot_response = clean_response(bot_response)
-            bot_response = add_conversational_elements(bot_response)
+        # Get and format the phone number
+        from_number = request.form.get('From', '')
+        if not from_number:
+            return generate_twiml_response("Missing sender number")
             
-        # Update conversation state
-        if "goodbye" in user_input.lower() or "thank" in user_input.lower():
-            update_conversation_state(from_number, ConversationState.FAREWELL)
-            bot_response += "\n\nTake care! Feel free to reach out if you need anything else."
-        else:
-            update_conversation_state(from_number, ConversationState.PROVIDING_ADVICE)
-
-        # Save initial conversation state
-        save_conversation(
-            phone_number=from_number,
-            user_input=user_input,
-            bot_response=bot_response,
-            response_time=response_time,
-            status='processing'
-        )
+        # Ensure proper WhatsApp format
+        if not from_number.startswith('whatsapp:'):
+            from_number = f"whatsapp:+{from_number.lstrip('+')}"
         
-        # Send message
-        logger.info(f"Attempting to send message to {from_number}: {bot_response[:100]}...")
+        user_input = request.form.get('Body', '').strip()
+        logger.info(f"Processing message from {from_number}: {user_input}")
+        
+        if not user_input:
+            return generate_twiml_response("Missing message content")
+
+        # Get and process AI response
+        bot_response, response_time = get_ai_response(user_input, get_conversation_history(from_number))
+        cleaned_response = clean_response(bot_response)
+        final_response = add_conversational_elements(cleaned_response)
+
+        # First send the text response via external_send_message
         send_result = external_send_message(
-            to_number=f"whatsapp:{from_number}" if not from_number.startswith('whatsapp:') else from_number,
-            body_text=bot_response,
+            to_number=from_number,
+            body_text=final_response,
             message_type='whatsapp'
         )
 
-        # Handle send result
         if not send_result.get('success'):
-            logger.error(f"Failed to send message: {send_result.get('error')}")
-            return _generate_twiml_response("Failed to send message. Please try again.")
+            logger.error(f"Failed to send text message: {send_result.get('error')}")
+            return generate_twiml_response("Failed to send message")
 
-        # Update final conversation status
+        # Try to generate and send audio
+        try:
+            audio_filename = tts_service.generate_speech(final_response, from_number)
+            if audio_filename:
+                # Construct the full audio URL - this is the key fix
+                audio_url = f"https://d242-102-244-33-70.ngrok-free.app/audio/{audio_filename}"
+                logger.info(f"Generated audio file: {audio_filename}")
+                logger.info(f"Audio URL: {audio_url}")
+                
+                # Wait a bit to ensure file is fully written
+                time.sleep(1)
+                
+                # Verify the file exists and get its size
+                audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
+                if os.path.exists(audio_path):
+                    file_size = os.path.getsize(audio_path)
+                    logger.info(f"Audio file size: {file_size} bytes")
+                    
+                    # Send audio using direct Twilio client instead of external function
+                    if send_whatsapp_audio(from_number, audio_url):
+                        status = 'sent_with_audio'
+                        logger.info("Audio message sent successfully")
+                    else:
+                        status = 'sent_text_only'
+                        logger.error("Failed to send audio message")
+                else:
+                    logger.error(f"Audio file not found after generation: {audio_path}")
+                    status = 'sent_text_only'
+            else:
+                status = 'sent_text_only'
+                logger.warning("Audio file generation failed")
+        except Exception as e:
+            logger.error(f"Audio generation failed: {e}")
+            status = 'sent_text_only'
+
+        # Save conversation with final status
         save_conversation(
             phone_number=from_number,
             user_input=user_input,
-            bot_response=bot_response,
+            bot_response=final_response,
             response_time=response_time,
-            status='sent'
+            status=status
         )
 
-        logger.info(f"Message sent successfully to {from_number}")
         return Response("OK", status=200)
 
     except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        try:
-            external_send_message(
-                to_number=from_number,
-                body_text="Sorry, there was an error processing your message. Please try again later.",
-                message_type='whatsapp'
-            )
-        except:
-            logger.error("Failed to send error message")
-        return Response("Error", status=500)
+        logger.error(f"Webhook error: {str(e)}", exc_info=True)
+        return generate_twiml_response("Sorry, there was an error processing your request.")
 
-def _generate_twiml_response(message):
-    """Helper to generate TwiML responses"""
+def generate_twiml_response(message):
+    """Generate TwiML response for WhatsApp"""
     resp = MessagingResponse()
     resp.message(message)
-    return Response(str(resp), content_type='application/xml')
+    return str(resp)
 
-# ... keep your existing /health and /conversations endpoints unchanged ...
+@app.route('/audio/<filename>')
+def serve_audio(filename):
+    try:
+        safe_filename = os.path.basename(filename)
+        audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', safe_filename)
+        
+        if os.path.exists(audio_path):
+            return send_file(
+                audio_path,
+                mimetype='audio/mp3',
+                as_attachment=True,
+                download_name=safe_filename
+            )
+        else:
+            logger.error(f"Audio file not found: {audio_path}")
+            return Response("Audio file not found", status=404)
+    except Exception as e:
+        logger.error(f"Error serving audio: {e}")
+        return Response("Error serving audio", status=500)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Simple health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/conversations/<phone_number>')
+def get_conversations(phone_number):
+    """Get conversation history for a phone number"""
+    try:
+        # Ensure proper WhatsApp format for lookup
+        if not phone_number.startswith('whatsapp:'):
+            phone_number = f"whatsapp:+{phone_number.lstrip('+')}"
+        
+        history = get_conversation_history(phone_number)
+        return jsonify({
+            "phone_number": phone_number,
+            "conversations": history
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
