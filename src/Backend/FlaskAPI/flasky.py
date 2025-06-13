@@ -29,6 +29,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['TWILIO_AUTH_TOKEN'] = config('TWILIO_AUTH_TOKEN')
 app.config['TWILIO_ACCOUNT_SID'] = config('TWILIO_ACCOUNT_SID')  # Add this
 app.config['STATIC_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+os.makedirs(os.path.join(app.config['STATIC_FOLDER'], 'audio'), exist_ok=True)
 
 # Initialize Twilio client for direct audio sending
 twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH_TOKEN'])
@@ -109,20 +110,21 @@ def add_conversational_elements(response):
     ]
     return f"{response}{random.choice(follow_ups)}"
 
-def send_whatsapp_audio(to_number, audio_url):
-    """Send audio message directly using Twilio client"""
+# Update the send_whatsapp_audio function
+def send_whatsapp_audio(to_number, audio_url, body_text=None):
+    """Send audio message via WhatsApp using Twilio"""
     try:
         message = twilio_client.messages.create(
             from_='whatsapp:+14155238886',  # Your Twilio WhatsApp number
             to=to_number,
             media_url=[audio_url],
-            body=""  # Empty body for audio-only message
+            body=body_text or ""
         )
         logger.info(f"Audio message sent successfully: {message.sid}")
-        return True
+        return {"success": True, "message_sid": message.sid}
     except Exception as e:
         logger.error(f"Failed to send audio message: {e}")
-        return False
+        return {"success": False, "error": str(e)}
 
 @app.route('/webhook', methods=['POST'])
 def whatsapp_webhook():
@@ -154,25 +156,34 @@ def whatsapp_webhook():
         
         if audio_filename:
             # Construct the public URL for the audio file
-            audio_url = f"https://d242-102-244-33-70.ngrok-free.app/audio/{audio_filename}"
+            ngrok_url = "https://3eac-129-0-79-131.ngrok-free.app"  # Update this with your actual ngrok URL
+            audio_url = f"{ngrok_url}/audio/{audio_filename}"
             
-            # Send message with audio
-            send_result = external_send_message(
+            # First, send the audio message
+            audio_result = send_whatsapp_audio(
                 to_number=from_number,
-                body_text=final_response,
-                media_url=audio_url,
-                message_type='whatsapp'
+                audio_url=audio_url,
+                body_text=final_response
             )
             
-            status = 'sent_with_audio' if send_result.get('success') else 'failed'
+            status = 'sent_with_audio' if audio_result.get('success') else 'audio_failed'
+            
+            if not audio_result.get('success'):
+                # Fallback to text-only if audio fails
+                text_result = external_send_message(
+                    to_number=from_number,
+                    body_text=final_response,
+                    message_type='whatsapp'
+                )
+                status = 'fallback_to_text'
         else:
-            # Fallback to text-only
-            send_result = external_send_message(
+            # Fallback to text-only if audio generation fails
+            text_result = external_send_message(
                 to_number=from_number,
                 body_text=final_response,
                 message_type='whatsapp'
             )
-            status = 'sent_text_only'
+            status = 'text_only'
 
         # Save conversation
         save_conversation(
@@ -202,9 +213,10 @@ def serve_audio(filename):
         audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', safe_filename)
         
         if os.path.exists(audio_path):
+            # Use audio/mpeg for MP3 files - this is the correct MIME type for Twilio
             return send_file(
                 audio_path,
-                mimetype='audio/mp3',
+                mimetype='audio/mpeg',  # Changed from audio/mp3
                 as_attachment=True,
                 download_name=safe_filename
             )

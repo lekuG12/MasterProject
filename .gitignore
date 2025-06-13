@@ -15,3 +15,5 @@ output.wav
 /*.gitignore
 /*.wav
 static
+/__pycache__
+*.pyc

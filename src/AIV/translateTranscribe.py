@@ -30,13 +30,14 @@ class TTSService:
             # Normalize audio levels
             normalized_audio = audio.normalize()
             
-            # Export with optimized settings
+            # Export with optimized settings for WhatsApp compatibility
             normalized_audio.export(
                 file_path,
                 format="mp3",
-                parameters=["-q:a", "0", "-b:a", "128k"]
+                parameters=["-q:a", "0", "-b:a", "128k", "-ar", "44100"],
+                tags={'Content-Type': 'audio/mpeg'}
             )
-
+            
             return filename
 
         except Exception as e:
