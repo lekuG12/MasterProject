@@ -1,5 +1,6 @@
 from gtts import gTTS
 from pydub import AudioSegment
+from transformers import pipeline
 import speech_recognition as sr
 import os
 import uuid
@@ -30,14 +31,13 @@ class TTSService:
             # Normalize audio levels
             normalized_audio = audio.normalize()
             
-            # Export with optimized settings for WhatsApp compatibility
+            # Export with optimized settings
             normalized_audio.export(
                 file_path,
                 format="mp3",
-                parameters=["-q:a", "0", "-b:a", "128k", "-ar", "44100"],
-                tags={'Content-Type': 'audio/mpeg'}
+                parameters=["-q:a", "0", "-b:a", "128k"]
             )
-            
+
             return filename
 
         except Exception as e:
@@ -54,6 +54,32 @@ class TTSService:
                     os.remove(file_path)
         except Exception as e:
             print(f"Error cleaning old files: {e}")
+
+    def transcribe_audio(self, audio_file_path):
+        """Convert audio to text using speech recognition"""
+        try:
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(audio_file_path) as source:
+                audio_data = recognizer.record(source)
+                text = recognizer.recognize_google(audio_data)  # Using Google's API
+                return text
+        except Exception as e:
+            print(f"Error transcribing audio: {e}")
+            return None
+
+    def download_audio_from_url(self, audio_url, save_path):
+        """Download audio file from URL"""
+        try:
+            import requests
+            response = requests.get(audio_url)
+            if response.status_code == 200:
+                with open(save_path, 'wb') as f:
+                    f.write(response.content)
+                return True
+            return False
+        except Exception as e:
+            print(f"Error downloading audio: {e}")
+            return False
 
 class SpeechConverter:
     def __init__(self, temp_dir="temp_audio"):

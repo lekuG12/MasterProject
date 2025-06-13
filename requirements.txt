@@ -9,9 +9,9 @@ pyngrok
 Flask-SQLAlchemy
 flask
 gTTS
-pydub
-SpeechRecognition
-requests
+pydub==0.25.1
+SpeechRecognition==3.10.0
+requests==2.31.0
 python-dotenv
 openai
 boto3
