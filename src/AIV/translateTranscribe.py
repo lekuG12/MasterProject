@@ -7,6 +7,11 @@ import uuid
 import time
 import requests
 import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from urllib.parse import urlparse
+from decouple import config
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,36 +23,39 @@ class TTSService:
         os.makedirs(self.static_dir, exist_ok=True)
 
     def generate_speech(self, text, phone_number=None):
-        """
-        Generate speech from text and save as audio file
-        Returns: filename of the generated audio
-        """
+        """Generate speech from text with status updates"""
         try:
-            # Create unique filename using phone number if provided
+            # Notify start of process
+            status_msg = "🎯 Generating your voice response..."
+            logger.info(status_msg)
+            
+            # Create unique filename
             filename = f"response_{phone_number.split(':')[-1]}_{uuid.uuid4().hex[:8]}.mp3"
             file_path = os.path.join(self.static_dir, filename)
 
-            # Generate MP3 using gTTS
+            # Generate MP3
+            logger.info("🔊 Converting text to speech...")
             tts = gTTS(text=text, lang='en', slow=False)
             tts.save(file_path)
 
-            # Convert to proper format and optimize
+            # Optimize audio
+            logger.info("⚡ Optimizing audio quality...")
             audio = AudioSegment.from_mp3(file_path)
-            
-            # Normalize audio levels
             normalized_audio = audio.normalize()
             
             # Export with optimized settings
+            logger.info("💾 Saving optimized audio...")
             normalized_audio.export(
                 file_path,
                 format="mp3",
                 parameters=["-q:a", "0", "-b:a", "128k"]
             )
 
+            logger.info("✅ Voice response ready!")
             return filename
 
         except Exception as e:
-            logger.error(f"Error generating speech: {e}")
+            logger.error(f"❌ Error generating speech: {e}")
             return None
 
     def clean_old_files(self, max_age_hours=24):
@@ -62,67 +70,94 @@ class TTSService:
             logger.error(f"Error cleaning old files: {e}")
 
     def transcribe_audio(self, audio_file_path):
-        """Convert audio to text using speech recognition"""
+        """Convert audio to text with status updates"""
         try:
+            logger.info("🎤 Processing your voice message...")
+            audio = AudioSegment.from_file(audio_file_path)
+            
+            # Create temporary WAV file
+            temp_wav = os.path.join(
+                os.path.dirname(audio_file_path),
+                f"temp_{int(time.time())}.wav"
+            )
+            
+            logger.info("🔄 Converting audio format...")
+            audio.export(
+                temp_wav,
+                format="wav",
+                parameters=[
+                    "-ac", "1",
+                    "-ar", "16000",
+                    "-sample_fmt", "s16"
+                ]
+            )
+            
+            # Initialize recognizer
             recognizer = sr.Recognizer()
-            
-            # Adjust recognition parameters
-            recognizer.energy_threshold = 300  # Increase sensitivity
+            recognizer.energy_threshold = 300
             recognizer.dynamic_energy_threshold = True
-            recognizer.pause_threshold = 0.8  # Shorter pause threshold
+            recognizer.pause_threshold = 0.8
             
-            with sr.AudioFile(audio_file_path) as source:
-                logger.info("Reading audio file")
-                # Adjust for ambient noise
-                recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                
-                logger.info("Recording audio data")
-                audio_data = recognizer.record(source)
-                
-                logger.info("Starting transcription")
-                # Try multiple recognition attempts with different APIs
-                try:
+            try:
+                with sr.AudioFile(temp_wav) as source:
+                    logger.info("👂 Listening to your message...")
+                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    
+                    logger.info("📝 Converting speech to text...")
+                    audio_data = recognizer.record(source)
+                    
                     text = recognizer.recognize_google(audio_data, language='en-US')
-                    logger.info("Successfully transcribed using Google Speech Recognition")
-                except:
-                    try:
-                        text = recognizer.recognize_sphinx(audio_data)
-                        logger.info("Successfully transcribed using Sphinx")
-                    except:
-                        logger.error("All transcription attempts failed")
-                        return None
-                        
-                return text.strip()
-                
+                    logger.info("✅ Successfully converted your voice to text!")
+                    
+                    return text.strip()
+                    
+            finally:
+                if os.path.exists(temp_wav):
+                    os.remove(temp_wav)
+                    
         except Exception as e:
-            logger.error(f"Error in transcribe_audio: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error processing voice message: {str(e)}")
             return None
 
     def download_audio_from_url(self, audio_url, save_path):
-        """Download audio file from URL with comprehensive error handling"""
+        """Download audio with progress updates"""
         try:
-            # Set up headers to mimic a browser request
+            logger.info("📥 Receiving your voice message...")
+            
+            # Set up retry strategy
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[500, 502, 503, 504]
+            )
+
+            # Create session with retry strategy
+            session = requests.Session()
+            session.mount("https://", HTTPAdapter(max_retries=retry_strategy))
+            session.mount("http://", HTTPAdapter(max_retries=retry_strategy))
+
+            # Add Twilio authentication
+            auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+            
+            # Set up headers with auth
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'audio/*, application/octet-stream'
             }
 
-            # Make request with extended timeout and headers
-            response = requests.get(
+            logger.info(f"Attempting to download audio from: {audio_url}")
+            
+            # Download the file with authentication
+            response = session.get(
                 audio_url,
+                auth=auth,
                 stream=True,
                 timeout=60,
-                headers=headers,
-                verify=True  # Enable SSL verification
+                headers=headers
             )
             response.raise_for_status()
 
-            # Verify content type
-            content_type = response.headers.get('content-type', '')
-            if not any(audio_type in content_type.lower() for audio_type in ['audio/', 'application/octet-stream']):
-                logger.error(f"Invalid content type received: {content_type}")
-                return False
-
-            # Ensure the directory exists
+            # Ensure directory exists
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
             # Download with progress tracking
@@ -137,31 +172,79 @@ class TTSService:
                         downloaded_size += len(chunk)
                         if total_size:
                             progress = (downloaded_size / total_size) * 100
-                            logger.debug(f"Download progress: {progress:.1f}%")
+                            if progress % 25 == 0:  # Update every 25%
+                                logger.info(f"📊 Download progress: {progress:.0f}%")
 
             # Verify downloaded file
             if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                logger.info(f"Successfully downloaded audio ({os.path.getsize(save_path)} bytes) to {save_path}")
+                file_size = os.path.getsize(save_path)
+                logger.info(f"Successfully downloaded audio file ({file_size} bytes)")
                 return True
             else:
                 logger.error("Downloaded file is empty or missing")
                 return False
 
-        except requests.exceptions.SSLError as e:
-            logger.error(f"SSL Certificate error: {str(e)}")
-            return False
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection error: {str(e)}")
-            return False
-        except requests.exceptions.Timeout as e:
-            logger.error(f"Request timed out: {str(e)}")
-            return False
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Download error: {str(e)}")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                logger.error("Authentication failed. Check Twilio credentials.")
+            else:
+                logger.error(f"HTTP error occurred: {str(e)}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error while downloading audio: {str(e)}", exc_info=True)
+            logger.error(f"Error downloading audio: {str(e)}", exc_info=True)
             return False
+        finally:
+            session.close()
+
+    def clean_response(self, text):
+        """Clean up the AI response by removing artifacts and formatting the output"""
+        try:
+            # Remove all text within square brackets
+            cleaned_text = re.sub(r'\[.*?\]', '', text)
+            
+            # Split into sections
+            sections = cleaned_text.split('\n')
+            formatted_response = []
+            
+            current_section = None
+            for line in sections:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Handle section headers
+                if line.lower().startswith('diagnosis:'):
+                    current_section = 'diagnosis'
+                    formatted_response.append("*Diagnosis*:")
+                    continue
+                elif line.lower().startswith('first aid'):
+                    current_section = 'first_aid'
+                    formatted_response.append("\n*First Aid Steps*:")
+                    continue
+                    
+                # Clean and format line content
+                line = re.sub(r'ptoms:|symptoms:', '', line, flags=re.IGNORECASE)
+                line = re.sub(r'^\s*[•●]\s*', '• ', line)  # Standardize bullet points
+                
+                # Add line to appropriate section
+                if current_section == 'diagnosis':
+                    if not line.startswith('*'):
+                        formatted_response.append(line)
+                elif current_section == 'first_aid':
+                    if line.lower().startswith('urgent') or 'immediate' in line.lower():
+                        urgent_message = "\n⚠ URGENT: " + line.split(':')[-1].strip()
+                        formatted_response.append(urgent_message)
+                    elif not line.startswith(('*', '⚠')):
+                        formatted_response.append(f"• {line.strip('•').strip()}")
+            
+            # Add conversational ending
+            formatted_response.append("\nHave you tried any remedies so far?")
+            
+            return '\n'.join(formatted_response)
+            
+        except Exception as e:
+            logger.error(f"Error cleaning response: {str(e)}")
+            return text  # Return original text if cleaning fails
 
 class SpeechConverter:
     def __init__(self, temp_dir="temp_audio"):

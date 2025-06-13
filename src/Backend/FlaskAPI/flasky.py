@@ -135,6 +135,23 @@ def send_whatsapp_audio(to_number, audio_url):
         logger.error(f"Failed to send audio message: {e}")
         return False
 
+def generate_twiml_response(message, status="info"):
+    """Generate TwiML response with appropriate emoji and styling"""
+    emoji_map = {
+        "info": "ℹ️",
+        "success": "✅",
+        "error": "❌",
+        "warning": "⚠️",
+        "processing": "⏳",
+        "listening": "👂",
+        "thinking": "🤔",
+        "speaking": "🗣️"
+    }
+    emoji = emoji_map.get(status, "")
+    response = MessagingResponse()
+    response.message(f"{emoji} {message}")
+    return str(response)
+
 @app.route('/webhook', methods=['POST'])
 def whatsapp_webhook():
     """Handle incoming WhatsApp messages"""
@@ -153,6 +170,21 @@ def whatsapp_webhook():
         num_media = int(request.form.get('NumMedia', 0))
         user_input = None
 
+        # Initial acknowledgment based on input type
+        if int(request.form.get('NumMedia', 0)) > 0:
+            external_send_message(
+                to_number=from_number,
+                body_text="👂 Processing your voice message...",
+                message_type='whatsapp'
+            )
+        else:
+            external_send_message(
+                to_number=from_number,
+                body_text="✅ Got your message! Processing...",
+                message_type='whatsapp'
+            )
+
+        # Process either audio or text input
         if num_media > 0 and request.form.get('MediaContentType0', '').startswith('audio/'):
             # Handle audio input
             try:
@@ -195,7 +227,7 @@ def whatsapp_webhook():
                 
                 if not user_input:
                     logger.error("Audio transcription failed")
-                    return generate_twiml_response("Sorry, I couldn't understand the audio. Please try again or send a text message")
+                    return generate_twiml_response("Sorry, I couldn't understand the audio. Please try again")
                     
                 logger.info(f"Successfully transcribed audio to: {user_input}")
                 
@@ -220,26 +252,31 @@ def whatsapp_webhook():
 
         logger.info(f"Processing message from {from_number}: {user_input}")
 
-        # Get AI response
+        # Get and process AI response
         bot_response, response_time = get_ai_response(user_input, get_conversation_history(from_number))
         cleaned_response = clean_response(bot_response)
         final_response = add_conversational_elements(cleaned_response)
 
-        # Generate audio before sending response
+        # Always generate audio response
+        external_send_message(
+            to_number=from_number,
+            body_text="🎯 Creating your response...",
+            message_type='whatsapp'
+        )
+
         audio_filename = tts_service.generate_speech(final_response, from_number)
         
+        # Send both text and audio responses
         if audio_filename:
-            # Construct the public URL for the audio file
-            audio_url = f"https://3eac-129-0-79-131.ngrok-free.app/audio/{audio_filename}"
-            
-            # First send the text message
+            # Send text response first
             text_result = external_send_message(
                 to_number=from_number,
                 body_text=final_response,
                 message_type='whatsapp'
             )
             
-            # Then send the audio message separately
+            # Construct audio URL and send audio
+            audio_url = f"https://3eac-129-0-79-131.ngrok-free.app/audio/{audio_filename}"
             audio_result = twilio_client.messages.create(
                 from_='whatsapp:+14155238886',
                 to=from_number,
@@ -248,8 +285,8 @@ def whatsapp_webhook():
             
             status = 'sent_with_audio' if audio_result.sid else 'failed'
         else:
-            # Fallback to text-only
-            send_result = external_send_message(
+            # Fallback to text-only if audio generation fails
+            text_result = external_send_message(
                 to_number=from_number,
                 body_text=final_response,
                 message_type='whatsapp'
@@ -269,13 +306,10 @@ def whatsapp_webhook():
 
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}", exc_info=True)
-        return generate_twiml_response("Sorry, there was an error processing your request.")
-
-def generate_twiml_response(message):
-    """Generate TwiML response for WhatsApp"""
-    resp = MessagingResponse()
-    resp.message(message)
-    return str(resp)
+        return generate_twiml_response(
+            "Sorry, something went wrong. Please try again in a moment.",
+            status="error"
+        )
 
 @app.route('/audio/<filename>')
 def serve_audio(filename):
