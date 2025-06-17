@@ -42,14 +42,26 @@ app.config.update(
 # Initialize Twilio client for direct audio sending
 twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH_TOKEN'])
 
-# Initialize components
-init_database(app)
-initialize_model()
+# Initialize components with better error handling
+try:
+    init_database(app)
+    logger.info("Database initialized successfully")
+except Exception as e:
+    logger.error(f"Database initialization failed: {e}")
+    raise RuntimeError("Failed to initialize database")
 
-# Initialize TTS service
+# Initialize AI model
+try:
+    if not initialize_model():
+        logger.error("Model initialization returned False")
+        raise RuntimeError("Model initialization failed")
+    logger.info("AI model initialized successfully")
+except Exception as e:
+    logger.error(f"Model initialization failed: {e}")
+    raise RuntimeError("Failed to initialize AI model")
+
+# Initialize other components
 tts_service = TTSService()
-
-# Initialize conversation manager
 conversation_manager = ConversationManager()
 
 # Ensure temp folder exists
@@ -294,8 +306,23 @@ def whatsapp_webhook():
 
         logger.info(f"Processing message from {from_number}: {user_input}")
 
-        # Get and process AI response
-        bot_response, response_time = get_ai_response(user_input, get_conversation_history(from_number))
+        # Get context history before processing
+        context_history = conversation_manager.get_context_history(from_number)
+
+        # Get and process AI response with context
+        try:
+            bot_response, response_time = get_ai_response(
+                user_input, 
+                get_conversation_history(from_number),
+                context_history
+            )
+        except RuntimeError as e:
+            logger.error(f"AI model error: {e}")
+            return generate_twiml_response(
+                "Sorry, the AI service is currently unavailable. Please try again later.",
+                status="error"
+            )
+
         cleaned_response = clean_response(bot_response)
         final_response, follow_up_question = add_conversational_elements(cleaned_response)
 
@@ -344,11 +371,11 @@ def whatsapp_webhook():
             status=status
         )
 
-        # Update session after AI response
+        # Update session with new context and follow-up
         conversation_manager.update_session(
             from_number,
             context=cleaned_response,
-            question=follow_up_question  # Use the returned follow-up question
+            question=follow_up_question
         )
 
         return Response("OK", status=200)

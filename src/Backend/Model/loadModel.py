@@ -5,6 +5,7 @@ import logging
 import time
 import re
 from threading import Lock
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -14,25 +15,20 @@ class AiModel:
         self.model = None
         self.model_lock = Lock()
         self.is_loaded = False
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.generation_config = None
+        self.model_name = "microsoft/phi-2"  # Default model
 
     def load_model(self):
         try:
-            hf_token = config('HUGGING_FACE_TOKEN')
-            gpt_model = config('GPT_MODEL')
+            logger.info(f"Loading model: {self.model_name} on {self.device}")
             
-            if not hf_token or not gpt_model:
-                raise ValueError("Missing required environment variables")
-            
-            logger.info(f"Loading model: {gpt_model} on {self.device}")
-
-            # Load tokenizer with position embedding handling
+            # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
-                gpt_model,
-                use_auth_token=hf_token,
+                self.model_name,
+                trust_remote_code=True,
                 padding_side="left",
-                model_max_length=1024  # Add this line
+                model_max_length=1024
             )
             
             # Ensure pad token is set
@@ -40,29 +36,33 @@ class AiModel:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-            # Load model with device management
+            # Load model
             self.model = AutoModelForCausalLM.from_pretrained(
-                gpt_model,
-                use_auth_token=hf_token,
-                torch_dtype=torch.float16 if "cuda" in str(self.device) else torch.float32
-            ).to(self.device)
+                self.model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                trust_remote_code=True,
+                low_cpu_mem_usage=True
+            )
             
-            # Set to evaluation mode
-            self.model.eval()
-            
-            # Create generation config
-            self.generation_config = GenerationConfig.from_model_config(self.model.config)
-            self.generation_config.max_new_tokens = 512
-            self.generation_config.temperature = 0.7
-            self.generation_config.do_sample = True
-            self.generation_config.pad_token_id = self.tokenizer.eos_token_id
+            # Set generation config
+            self.generation_config = GenerationConfig(
+                max_new_tokens=512,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                top_p=0.9,
+                top_k=50
+            )
             
             self.is_loaded = True
-            logger.info(f"Model {gpt_model} loaded successfully")
+            logger.info(f"Model {self.model_name} loaded successfully")
+            return True
 
         except Exception as e:
             logger.exception("Failed to load model")
-            raise RuntimeError(f"Model loading failed: {str(e)}")
+            return False
 
     def generate_response(self, user_input, conversation_history=None, max_new_tokens=512):
         if not self.is_loaded:
@@ -211,11 +211,45 @@ class AiModel:
         else:
             return "Thank you for your message. A nurse will respond shortly."
 
-# Singleton instance
+# Create singleton instance
 ai_model = AiModel()
 
 def initialize_model():
-    ai_model.load_model()
+    """Initialize the AI model and tokenizer"""
+    return ai_model.load_model()
 
-def get_ai_response(user_input, conversation_history=None):
-    return ai_model.generate_response(user_input, conversation_history)
+def get_ai_response(user_input, conversation_history=None, context_history=None):
+    """Get AI response with context"""
+    if not ai_model.is_loaded:
+        raise RuntimeError("Model not initialized. Call initialize_model() first.")
+    
+    start_time = time.time()
+    
+    try:
+        with ai_model.model_lock:
+            # Build context
+            context = ai_model._build_context(user_input, conversation_history)
+            
+            # Generate response
+            inputs = ai_model.tokenizer(
+                context,
+                return_tensors="pt",
+                truncation=True,
+                max_length=1024,
+                padding=True
+            ).to(ai_model.device)
+            
+            with torch.no_grad():
+                outputs = ai_model.model.generate(
+                    **inputs,
+                    generation_config=ai_model.generation_config
+                )
+            
+            response = ai_model.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            cleaned_response = ai_model._clean_response(response)
+            
+            return cleaned_response, time.time() - start_time
+            
+    except Exception as e:
+        logger.error(f"Error generating response: {e}")
+        return ai_model._fallback_response(user_input), time.time() - start_time
