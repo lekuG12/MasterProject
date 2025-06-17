@@ -16,6 +16,7 @@ from Backend.Model.response_handler import clean_response, add_conversational_el
 from Backend.Model.conversation_state import ConversationState, get_conversation_state, update_conversation_state
 from twilioM.nurseTalk import send_message as external_send_message
 from AIV.translateTranscribe import TTSService
+from Backend.Model.conversation_patterns import ConversationManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +48,9 @@ initialize_model()
 
 # Initialize TTS service
 tts_service = TTSService()
+
+# Initialize conversation manager
+conversation_manager = ConversationManager()
 
 # Ensure temp folder exists
 os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
@@ -111,14 +115,32 @@ def clean_response(text):
     return cleaned_text
 
 def add_conversational_elements(response):
-    """Add a single follow-up question after the medical advice"""
-    follow_ups = [
-        "\n\nHow long has your child been experiencing these symptoms?",
-        "\n\nHas your child been feeding normally?",
-        "\n\nWhat temperature readings have you observed?",
-        "\n\nHave you tried any remedies so far?"
-    ]
-    return f"{response}{random.choice(follow_ups)}"
+    """Add contextual follow-up questions and return both response and selected question"""
+    follow_ups = []
+    
+    # Context-aware follow-ups based on response content
+    if 'fever' in response.lower():
+        follow_ups.extend([
+            "What is the current temperature?",
+            "How long has the fever lasted?",
+            "Have you taken any fever medication?"
+        ])
+    elif 'pain' in response.lower():
+        follow_ups.extend([
+            "On a scale of 1-10, how severe is the pain?",
+            "Is the pain constant or does it come and go?",
+            "What makes the pain better or worse?"
+        ])
+    else:
+        follow_ups.extend([
+            "How long has your child been experiencing these symptoms?",
+            "Has your child been feeding normally?",
+            "Have you tried any remedies so far?"
+        ])
+    
+    selected_question = random.choice(follow_ups)
+    final_response = f"{response}\n\n{selected_question}"
+    return final_response, selected_question
 
 def send_whatsapp_audio(to_number, audio_url):
     """Send audio message directly using Twilio client"""
@@ -180,9 +202,29 @@ def whatsapp_webhook():
         else:
             external_send_message(
                 to_number=from_number,
-                body_text="✅ Got your message! Processing...",
+                body_text="✅ Processing...",
                 message_type='whatsapp'
             )
+
+        # Check for quick responses first
+        if not num_media:  # Only for text messages
+            quick_response = conversation_manager.get_quick_response(
+                request.form.get('Body', '').strip(),
+                from_number
+            )
+            if quick_response:
+                external_send_message(
+                    to_number=from_number,
+                    body_text=quick_response,
+                    message_type='whatsapp'
+                )
+                save_conversation(
+                    phone_number=from_number,
+                    user_input=request.form.get('Body', '').strip(),
+                    bot_response=quick_response,
+                    status='quick_response'
+                )
+                return Response("OK", status=200)
 
         # Process either audio or text input
         if num_media > 0 and request.form.get('MediaContentType0', '').startswith('audio/'):
@@ -255,7 +297,7 @@ def whatsapp_webhook():
         # Get and process AI response
         bot_response, response_time = get_ai_response(user_input, get_conversation_history(from_number))
         cleaned_response = clean_response(bot_response)
-        final_response = add_conversational_elements(cleaned_response)
+        final_response, follow_up_question = add_conversational_elements(cleaned_response)
 
         # Always generate audio response
         external_send_message(
@@ -276,7 +318,7 @@ def whatsapp_webhook():
             )
             
             # Construct audio URL and send audio
-            audio_url = f"https://3eac-129-0-79-131.ngrok-free.app/audio/{audio_filename}"
+            audio_url = f"https://5695-129-0-125-142.ngrok-free.app/audio/{audio_filename}"
             audio_result = twilio_client.messages.create(
                 from_='whatsapp:+14155238886',
                 to=from_number,
@@ -300,6 +342,13 @@ def whatsapp_webhook():
             bot_response=final_response,
             response_time=response_time,
             status=status
+        )
+
+        # Update session after AI response
+        conversation_manager.update_session(
+            from_number,
+            context=cleaned_response,
+            question=follow_up_question  # Use the returned follow-up question
         )
 
         return Response("OK", status=200)

@@ -1,0 +1,50 @@
+# Core Technologies
+
+## Python Web Framework
+- Flask: Main web framework for building the REST API and handling webhooks
+- FastAPI: Listed in requirements but not currently used
+
+## Database
+- SQLAlchemy: ORM for database operations
+- SQLite: Local database storage (nurse_talk.db)
+
+## Communication Services
+- Twilio: WhatsApp messaging integration and audio message handling
+- ngrok: Tunnel service for exposing local server to internet (3eac-129-0-79-131.ngrok-free.app)
+
+## AI and Machine Learning
+- Hugging Face Transformers: AI model pipeline for processing messages
+- Langchain: AI framework (listed in requirements)
+- OpenAI: AI integration (listed in requirements)
+
+## Audio Processing
+- gTTS (Google Text-to-Speech): Converting text responses to speech
+- pydub: Audio file manipulation and format conversion
+- SpeechRecognition: Converting voice messages to text
+- libopus codec: Audio encoding for OGG format
+
+## Development & Testing
+- pytest: Unit testing framework
+- pytest-cov: Test coverage reporting
+- black: Code formatting
+- flake8: Code linting
+- isort: Import sorting
+
+## Utilities
+- python-decouple: Environment variable management
+- python-dotenv: Environment variable loading
+- logging: Application logging
+- python-multipart: Handling multipart form data
+- gunicorn: Production WSGI server
+- uvicorn: ASGI server (listed but not used)
+- boto3: AWS SDK (listed but not used)
+
+## Storage & File Handling
+- Static file serving for audio files
+- Temporary file management for audio processing
+- File format support: MP3, WAV, OGG
+
+## Authentication & Security
+- Twilio request validation
+- Environment-based configuration
+- Token-based authentication for AI services
