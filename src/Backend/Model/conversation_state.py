@@ -1,12 +1,12 @@
 from enum import Enum
 from datetime import datetime
 
-class ConversationState(Enum):
-    GREETING = "greeting"
-    COLLECTING_INFO = "collecting_info"
-    PROVIDING_ADVICE = "providing_advice"
-    FOLLOW_UP = "follow_up"
-    FAREWELL = "farewell"
+class ConversationState:
+    def __init__(self):
+        self.context = ""
+        self.last_question = ""
+        self.asked_questions = set()  # Add this line
+        self.last_update = datetime.now()
 
 _conversation_states = {}
 

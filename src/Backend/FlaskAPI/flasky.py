@@ -11,7 +11,7 @@ from twilio.rest import Client
 from decouple import config
 
 from Backend.database.data import db, init_database, save_conversation, get_conversation_history
-from Backend.Model.loadModel import initialize_model, get_ai_response
+from Backend.Model.loadModel import initialize_model, clear_model_cache, get_ai_response
 from Backend.Model.response_handler import clean_response, add_conversational_elements
 from Backend.Model.conversation_state import ConversationState, get_conversation_state, update_conversation_state
 from twilioM.nurseTalk import send_message as external_send_message
@@ -53,12 +53,12 @@ except Exception as e:
 # Initialize AI model
 try:
     if not initialize_model():
-        logger.error("Model initialization returned False")
+        logger.error("Model initialization failed")
         raise RuntimeError("Model initialization failed")
     logger.info("AI model initialized successfully")
 except Exception as e:
     logger.error(f"Model initialization failed: {e}")
-    raise RuntimeError("Failed to initialize AI model")
+    raise RuntimeError(f"Failed to initialize AI model: {str(e)}")
 
 # Initialize other components
 tts_service = TTSService()
@@ -128,29 +128,65 @@ def clean_response(text):
 
 def add_conversational_elements(response):
     """Add contextual follow-up questions and return both response and selected question"""
-    follow_ups = []
-    
-    # Context-aware follow-ups based on response content
-    if 'fever' in response.lower():
-        follow_ups.extend([
+    follow_ups = {
+        'fever': [
             "What is the current temperature?",
             "How long has the fever lasted?",
-            "Have you taken any fever medication?"
-        ])
-    elif 'pain' in response.lower():
-        follow_ups.extend([
+            "Have you taken any fever medication?",
+            "Is there any shivering or sweating?",
+            "What time of day does the fever peak?"
+        ],
+        'pain': [
             "On a scale of 1-10, how severe is the pain?",
             "Is the pain constant or does it come and go?",
-            "What makes the pain better or worse?"
-        ])
-    else:
-        follow_ups.extend([
-            "How long has your child been experiencing these symptoms?",
+            "What makes the pain better or worse?",
+            "Can you point to where it hurts the most?",
+            "Does the pain move to other areas?"
+        ],
+        'general': [
+            "How long have these symptoms been present?",
             "Has your child been feeding normally?",
-            "Have you tried any remedies so far?"
-        ])
+            "Have you tried any remedies so far?",
+            "Are there any other symptoms I should know about?",
+            "Has your child had similar symptoms before?",
+            "Has there been any recent exposure to sick people?",
+            "How is your child's energy level?",
+            "Are there any changes in sleep patterns?"
+        ]
+    }
     
-    selected_question = random.choice(follow_ups)
+    # Get conversation state for this user
+    conversation_state = get_conversation_state(request.form.get('From', ''))
+    
+    # Track previously asked questions
+    if not hasattr(conversation_state, 'asked_questions'):
+        conversation_state.asked_questions = set()
+    
+    # Determine which question set to use based on response content
+    if 'fever' in response.lower():
+        available_questions = follow_ups['fever']
+    elif 'pain' in response.lower():
+        available_questions = follow_ups['pain']
+    else:
+        available_questions = follow_ups['general']
+    
+    # Filter out previously asked questions
+    unasked_questions = [q for q in available_questions if q not in conversation_state.asked_questions]
+    
+    # If all questions have been asked, reset the history
+    if not unasked_questions:
+        conversation_state.asked_questions.clear()
+        unasked_questions = available_questions
+    
+    # Select a random question from unasked ones
+    selected_question = random.choice(unasked_questions)
+    
+    # Add to asked questions history
+    conversation_state.asked_questions.add(selected_question)
+    
+    # Update conversation state
+    update_conversation_state(request.form.get('From', ''), conversation_state)
+    
     final_response = f"{response}\n\n{selected_question}"
     return final_response, selected_question
 
@@ -345,7 +381,7 @@ def whatsapp_webhook():
             )
             
             # Construct audio URL and send audio
-            audio_url = f"https://5695-129-0-125-142.ngrok-free.app/audio/{audio_filename}"
+            audio_url = f" https://160f-102-244-157-47.ngrok-free.app/audio/{audio_filename}"
             audio_result = twilio_client.messages.create(
                 from_='whatsapp:+14155238886',
                 to=from_number,

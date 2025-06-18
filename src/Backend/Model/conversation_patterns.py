@@ -21,7 +21,7 @@ class ConversationManager:
             
         # Handle standard quick responses
         if message in ['hi', 'hello', 'hey']:
-            return "Hello! How can I assist you with your health concerns today?"
+            return "Hello! How can I assist you today?"
             
         # Gratitude
         if message in ['thank you', 'thanks', 'thx']:
