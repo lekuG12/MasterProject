@@ -17,6 +17,7 @@ from Backend.Model.conversation_state import ConversationState, get_conversation
 from twilioM.nurseTalk import send_message as external_send_message
 from AIV.translateTranscribe import TTSService
 from Backend.Model.conversation_patterns import ConversationManager
+from Backend.Model.model_singleton import ModelSingleton
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +39,7 @@ app.config.update(
     ALLOWED_AUDIO_TYPES=['audio/ogg', 'audio/mpeg', 'audio/mp3', 'audio/wav'],
     AUDIO_CONVERSION_ENABLED=True
 )
+app.config['BASE_URL'] = config('BASE_URL', default='http://localhost:5000')
 
 # Initialize Twilio client for direct audio sending
 twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH_TOKEN'])
@@ -52,10 +54,9 @@ except Exception as e:
 
 # Initialize AI model
 try:
-    if not initialize_model():
-        logger.error("Model initialization failed")
-        raise RuntimeError("Model initialization failed")
-    logger.info("AI model initialized successfully")
+    model_singleton = ModelSingleton.get_instance()
+    model = model_singleton.get_model()
+    logger.info("AI model reference obtained successfully")
 except Exception as e:
     logger.error(f"Model initialization failed: {e}")
     raise RuntimeError(f"Failed to initialize AI model: {str(e)}")
@@ -380,14 +381,24 @@ def whatsapp_webhook():
                 message_type='whatsapp'
             )
             
-            # Construct audio URL and send audio
-            audio_url = f" https://160f-102-244-157-47.ngrok-free.app/audio/{audio_filename}"
+            # Construct audio URL using configured base URL
+            audio_url = f"{app.config['BASE_URL']}/audio/{audio_filename}"
+            logger.info(f"Attempting to send audio with URL: {audio_url}")
+
+            # Verify audio file exists before sending
+            audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
+            if not os.path.exists(audio_path):
+                logger.error(f"Audio file not found at {audio_path}")
+                raise FileNotFoundError("Audio file not found")
+
+            # Send audio message
             audio_result = twilio_client.messages.create(
                 from_='whatsapp:+14155238886',
                 to=from_number,
                 media_url=[audio_url]
             )
             
+            logger.info(f"Audio message sent successfully. SID: {audio_result.sid}")
             status = 'sent_with_audio' if audio_result.sid else 'failed'
         else:
             # Fallback to text-only if audio generation fails
@@ -466,6 +477,20 @@ def get_conversations(phone_number):
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def cleanup_old_audio_files():
+    """Clean up audio files older than 1 hour"""
+    audio_dir = os.path.join(app.config['STATIC_FOLDER'], 'audio')
+    current_time = time.time()
+    for filename in os.listdir(audio_dir):
+        file_path = os.path.join(audio_dir, filename)
+        # Remove files older than 1 hour
+        if os.path.getctime(file_path) < (current_time - 3600):
+            try:
+                os.remove(file_path)
+                logger.info(f"Cleaned up old audio file: {filename}")
+            except Exception as e:
+                logger.error(f"Failed to remove old audio file {filename}: {e}")
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
