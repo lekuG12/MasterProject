@@ -1,19 +1,41 @@
-/venv
-/Data
-/*.vscode
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+venv/
+Venv/
+env/
+ENV/
+
+# Instance Folder
+instance/
+
+# Environment files
+.env
+*.env
+
+# Cache
+.cache/
+model_cache/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+
+# Office files
 *.xlsx
 *.pdf
-/Venv
-/instance
-*.env
-.env
-nurse_talk_app.egg-info
-src/Backend/database/__pycache__
+
+# Audio files
 *.mp3
-*.gitignore
-output.wav
-/*.gitignore
-/*.wav
-static
-/__pycache__
-*.pyc
+*.wav
+
+# VSCode
+.vscode/

@@ -9,11 +9,12 @@ from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from decouple import config
+import requests
 
 from Backend.database.data import db, init_database, save_conversation, get_conversation_history
 from Backend.Model.loadModel import initialize_model, clear_model_cache, get_ai_response
-from Backend.Model.response_handler import clean_response, add_conversational_elements
-from Backend.Model.conversation_state import ConversationState, get_conversation_state, update_conversation_state
+from Backend.Model.conversation_state import get_conversation_state, ConversationStateType
+from Backend.Model.conversation_patterns import UserIntent
 from twilioM.nurseTalk import send_message as external_send_message
 from AIV.translateTranscribe import TTSService
 from Backend.Model.conversation_patterns import ConversationManager
@@ -39,7 +40,27 @@ app.config.update(
     ALLOWED_AUDIO_TYPES=['audio/ogg', 'audio/mpeg', 'audio/mp3', 'audio/wav'],
     AUDIO_CONVERSION_ENABLED=True
 )
-app.config['BASE_URL'] = config('BASE_URL', default='http://localhost:5000')
+
+def get_ngrok_url():
+    """Try to get the current ngrok URL automatically"""
+    try:
+        response = requests.get('http://localhost:4040/api/tunnels', timeout=3)
+        if response.status_code == 200:
+            tunnels = response.json()
+            if tunnels and 'tunnels' in tunnels:
+                for tunnel in tunnels['tunnels']:
+                    if tunnel['proto'] == 'https':
+                        return tunnel['public_url']
+        return None
+    except:
+        return None
+
+# Configure BASE_URL - use the provided ngrok URL directly
+base_url = 'https://ab5a-129-0-79-136.ngrok-free.app'
+logger.info(f"Using ngrok URL: {base_url}")
+
+app.config['BASE_URL'] = base_url
+logger.info(f"Configured BASE_URL: {base_url}")
 
 # Initialize Twilio client for direct audio sending
 twilio_client = Client(app.config['TWILIO_ACCOUNT_SID'], app.config['TWILIO_AUTH_TOKEN'])
@@ -69,127 +90,77 @@ conversation_manager = ConversationManager()
 os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
 
 def clean_response(text):
-    """Clean up the AI response with clear diagnosis and first aid steps"""
-    # Remove [augmented] tags and clean initial text
-    text = re.sub(r'\[augmented\]', '', text)
-    
-    # Extract
-    diagnosis_match = re.search(r'(?:Assessment:|Diagnosis:)\s*([^.!?\n]+)', text, re.IGNORECASE)
-    diagnosis = ""
-    if diagnosis_match:
-        diagnosis = diagnosis_match.group(1).strip()
-        # Clean up diagnosis
-        diagnosis = re.sub(r'(?:Assessment:|Diagnosis:)', '', diagnosis)
-        diagnosis = re.sub(r'ptoms:|symptoms:', '', diagnosis, flags=re.IGNORECASE)
-    
-    # Extract first aid steps
-    first_aid_steps = []
-    emergency_step = None
-    if 'First Aid:' in text:
-        first_aid_sections = text.split('First Aid:')[1:]
-        seen_steps = set()
-        
-        for section in first_aid_sections:
-            steps = [s.strip() for s in re.split(r'[.;]\s*', section) if s.strip()]
-            
-            for step in steps:
-                step_lower = step.lower()
-                # Identify emergency steps
-                if any(term in step_lower for term in ['emergency', 'urgent', 'call emergency', 'immediate']):
-                    emergency_step = "Seek immediate medical attention"
-                    continue
-                
-                # Filter out garbage and duplicates
-                if (not any(x in step_lower for x in ['ptoms:', 'symptoms:', 'netmessage', 'first aid:', 'assessment:']) and
-                    step_lower not in seen_steps and
-                    len(step) > 3):
-                    
-                    # Clean up the step
-                    clean_step = step.strip('., ')
-                    if clean_step and clean_step.lower() not in seen_steps:
-                        first_aid_steps.append(f"• {clean_step}")
-                        seen_steps.add(clean_step.lower())
-    
-    # Build the response with proper formatting
-    cleaned_text = "*Diagnosis*:\n"
-    cleaned_text += diagnosis if diagnosis else "Pending medical assessment"
-    
-    if first_aid_steps:
-        cleaned_text += "\n\n*First Aid Steps*:\n"
-        cleaned_text += "\n".join(first_aid_steps)
-        # Add emergency step at the end if present
-        if emergency_step:
-            cleaned_text += f"\n• {emergency_step}"
-    
-    # Add emergency warning only if emergency step present
-    if emergency_step:
-        cleaned_text += "\n\n⚠️ *URGENT*: Immediate medical attention required!"
-    
-    return cleaned_text
+    """
+    Cleans the raw AI model output by intelligently parsing multi-line
+    diagnosis and first-aid sections.
+    """
+    logger.info(f"Cleaning raw response: \"{text[:200]}...\"")
 
-def add_conversational_elements(response):
-    """Add contextual follow-up questions and return both response and selected question"""
-    follow_ups = {
-        'fever': [
-            "What is the current temperature?",
-            "How long has the fever lasted?",
-            "Have you taken any fever medication?",
-            "Is there any shivering or sweating?",
-            "What time of day does the fever peak?"
-        ],
-        'pain': [
-            "On a scale of 1-10, how severe is the pain?",
-            "Is the pain constant or does it come and go?",
-            "What makes the pain better or worse?",
-            "Can you point to where it hurts the most?",
-            "Does the pain move to other areas?"
-        ],
-        'general': [
-            "How long have these symptoms been present?",
-            "Has your child been feeding normally?",
-            "Have you tried any remedies so far?",
-            "Are there any other symptoms I should know about?",
-            "Has your child had similar symptoms before?",
-            "Has there been any recent exposure to sick people?",
-            "How is your child's energy level?",
-            "Are there any changes in sleep patterns?"
-        ]
-    }
-    
-    # Get conversation state for this user
-    conversation_state = get_conversation_state(request.form.get('From', ''))
-    
-    # Track previously asked questions
-    if not hasattr(conversation_state, 'asked_questions'):
-        conversation_state.asked_questions = set()
-    
-    # Determine which question set to use based on response content
-    if 'fever' in response.lower():
-        available_questions = follow_ups['fever']
-    elif 'pain' in response.lower():
-        available_questions = follow_ups['pain']
+    # 1. Initial cleanup
+    text = re.sub(r'\[.*?\]', '', text).strip()
+    text = text.replace("Answer:", "").strip()
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+
+    # 2. State-machine based parsing
+    diagnosis_lines = []
+    first_aid_lines = []
+    current_section = None
+
+    for line in lines:
+        # First, clean up any residual double spaces from the initial regex
+        line = re.sub(r'\s{2,}', ' ', line).strip()
+        if not line:
+            continue
+
+        if line.lower().startswith("diagnosis:"):
+            current_section = "diagnosis"
+            # Add the text after the keyword
+            diag_text = line.split(":", 1)[1].strip()
+            if diag_text:
+                diagnosis_lines.append(diag_text)
+            continue
+        elif line.lower().startswith("first aid:"):
+            current_section = "first_aid"
+            # Add the text after the keyword
+            aid_text = line.split(":", 1)[1].strip()
+            if aid_text:
+                first_aid_lines.append(aid_text)
+            continue
+        
+        # Append line to the current section if it's a continuation
+        if current_section == "diagnosis":
+            diagnosis_lines.append(line)
+        elif current_section == "first_aid":
+            first_aid_lines.append(line)
+        elif current_section is None:
+            # If we haven't found a section yet, assume it's part of the diagnosis
+            diagnosis_lines.append(line)
+
+    # 3. Process the collected lines
+    # Join multi-line diagnosis
+    if diagnosis_lines:
+        full_diagnosis = " ".join(diagnosis_lines)
     else:
-        available_questions = follow_ups['general']
+        full_diagnosis = "No specific diagnosis provided. Please describe the symptoms."
+
+    # De-duplicate first aid steps
+    unique_steps = []
+    seen_steps = set()
+    for step in first_aid_lines:
+        if step and step.lower() not in seen_steps:
+            unique_steps.append(step)
+            seen_steps.add(step.lower())
+            
+    # 4. Assemble the final response
+    cleaned_text = f"*Diagnosis*:\n{full_diagnosis}"
     
-    # Filter out previously asked questions
-    unasked_questions = [q for q in available_questions if q not in conversation_state.asked_questions]
-    
-    # If all questions have been asked, reset the history
-    if not unasked_questions:
-        conversation_state.asked_questions.clear()
-        unasked_questions = available_questions
-    
-    # Select a random question from unasked ones
-    selected_question = random.choice(unasked_questions)
-    
-    # Add to asked questions history
-    conversation_state.asked_questions.add(selected_question)
-    
-    # Update conversation state
-    update_conversation_state(request.form.get('From', ''), conversation_state)
-    
-    final_response = f"{response}\n\n{selected_question}"
-    return final_response, selected_question
+    if unique_steps:
+        cleaned_text += "\n\n*First Aid Steps*:"
+        for step in unique_steps:
+            cleaned_text += f"\n• {step}"
+            
+    logger.info(f"Cleaned response: \"{cleaned_text[:200]}...\"")
+    return cleaned_text
 
 def send_whatsapp_audio(to_number, audio_url):
     """Send audio message directly using Twilio client"""
@@ -225,234 +196,114 @@ def generate_twiml_response(message, status="info"):
 
 @app.route('/webhook', methods=['POST'])
 def whatsapp_webhook():
-    """Handle incoming WhatsApp messages"""
-    logger.info("Received webhook request")
+    """Handle incoming WhatsApp messages using a state machine."""
+    logger.info("--- Webhook request received ---")
     try:
-        # Get and format the phone number
         from_number = request.form.get('From', '')
-        if not from_number:
-            return generate_twiml_response("Missing sender number")
-            
-        # Ensure proper WhatsApp format
-        if not from_number.startswith('whatsapp:'):
-            from_number = f"whatsapp:+{from_number.lstrip('+')}"
+        user_input = request.form.get('Body', '').strip()
+
+        if not from_number or not user_input:
+            logger.warning("Request missing From or Body. Aborting.")
+            return Response("Request incomplete", status=400)
         
-        # Check if this is a text or audio message
-        num_media = int(request.form.get('NumMedia', 0))
-        user_input = None
+        session_state = get_conversation_state(from_number)
+        logger.info(f"User {from_number} is in state: {session_state.type.name}")
 
-        # Initial acknowledgment based on input type
-        if int(request.form.get('NumMedia', 0)) > 0:
-            external_send_message(
-                to_number=from_number,
-                body_text="👂 Processing your voice message...",
-                message_type='whatsapp'
-            )
-        else:
-            external_send_message(
-                to_number=from_number,
-                body_text="✅ Processing...",
-                message_type='whatsapp'
-            )
+        # --- State Machine Logic ---
+        if session_state.type == ConversationStateType.COLLECTING_SYMPTOMS:
+            if UserIntent.is_negative(user_input):
+                symptom_summary = session_state.get_all_symptoms()
+                logger.info(f"User finished. Generating diagnosis for: '{symptom_summary}'")
+                
+                if not symptom_summary:
+                    external_send_message(from_number, "Please describe the symptoms first.")
+                    session_state.reset()
+                    return Response("OK", status=200)
 
-        # Check for quick responses first
-        if not num_media:  # Only for text messages
-            quick_response = conversation_manager.get_quick_response(
-                request.form.get('Body', '').strip(),
-                from_number
-            )
-            if quick_response:
-                external_send_message(
-                    to_number=from_number,
-                    body_text=quick_response,
-                    message_type='whatsapp'
-                )
-                save_conversation(
-                    phone_number=from_number,
-                    user_input=request.form.get('Body', '').strip(),
-                    bot_response=quick_response,
-                    status='quick_response'
-                )
-                return Response("OK", status=200)
+                bot_response, _ = get_ai_response(symptom_summary)
+                cleaned_response = clean_response(bot_response)
 
-        # Process either audio or text input
-        if num_media > 0 and request.form.get('MediaContentType0', '').startswith('audio/'):
-            # Handle audio input
-            try:
-                media_url = request.form.get('MediaUrl0')
-                content_type = request.form.get('MediaContentType0')
+                logger.info("Sending final diagnosis text and audio...")
+                audio_filename = tts_service.generate_speech(cleaned_response, from_number)
+                if audio_filename:
+                    send_paired_response(from_number, cleaned_response, audio_filename)
+                else:
+                    external_send_message(from_number, cleaned_response)
                 
-                if not media_url:
-                    logger.error("No media URL provided")
-                    return generate_twiml_response("Audio message received but no media URL found")
-                    
-                if content_type not in app.config['ALLOWED_AUDIO_TYPES']:
-                    logger.error(f"Unsupported audio type: {content_type}")
-                    return generate_twiml_response("Sorry, this audio format is not supported")
-                
-                # Generate unique filename with timestamp
-                audio_extension = content_type.split('/')[-1]
-                timestamp = int(time.time())
-                temp_audio_path = os.path.join(
-                    app.config['TEMP_FOLDER'],
-                    f"input_{timestamp}_{random.randint(1000, 9999)}.{audio_extension}"
-                )
-                
-                logger.info(f"Downloading audio from {media_url} to {temp_audio_path}")
-                
-                # Ensure temp directory exists
-                os.makedirs(os.path.dirname(temp_audio_path), exist_ok=True)
-                
-                # Download and process audio
-                if not tts_service.download_audio_from_url(media_url, temp_audio_path):
-                    logger.error("Failed to download audio file")
-                    return generate_twiml_response("Sorry, couldn't download your audio message")
-                
-                # Verify file was downloaded and has content
-                if not os.path.exists(temp_audio_path) or os.path.getsize(temp_audio_path) == 0:
-                    logger.error("Downloaded audio file is empty or missing")
-                    return generate_twiml_response("Sorry, there was an issue with your audio message")
-                    
-                logger.info("Transcribing audio file")
-                user_input = tts_service.transcribe_audio(temp_audio_path)
-                
-                if not user_input:
-                    logger.error("Audio transcription failed")
-                    return generate_twiml_response("Sorry, I couldn't understand the audio. Please try again")
-                    
-                logger.info(f"Successfully transcribed audio to: {user_input}")
-                
-            except Exception as e:
-                logger.error(f"Error processing audio: {str(e)}", exc_info=True)
-                return generate_twiml_response("Sorry, there was an error processing your audio message")
+                session_state.reset()
+                logger.info(f"Conversation for {from_number} has been reset.")
+            else:
+                session_state.add_symptom(user_input)
+                logger.info(f"Added new symptom. History: {session_state.symptom_history}")
+                external_send_message(to_number=from_number, body_text="Got it. Anything else to add?")
+        else: # GREETING state
+            session_state.reset()
+            session_state.add_symptom(user_input)
+            session_state.type = ConversationStateType.COLLECTING_SYMPTOMS
+            logger.info(f"New conversation started. First symptom: '{user_input}'")
+            external_send_message(to_number=from_number, body_text="I've noted that. Is there anything else about the symptoms?")
             
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_audio_path):
-                    try:
-                        os.remove(temp_audio_path)
-                        logger.info(f"Cleaned up temporary file: {temp_audio_path}")
-                    except Exception as e:
-                        logger.error(f"Error cleaning up temp file: {str(e)}")
-        else:
-            # Handle text input
-            user_input = request.form.get('Body', '').strip()
-
-        if not user_input:
-            return generate_twiml_response("Could not process your message. Please try again.")
-
-        logger.info(f"Processing message from {from_number}: {user_input}")
-
-        # Get context history before processing
-        context_history = conversation_manager.get_context_history(from_number)
-
-        # Get and process AI response with context
-        try:
-            bot_response, response_time = get_ai_response(
-                user_input, 
-                get_conversation_history(from_number),
-                context_history
-            )
-        except RuntimeError as e:
-            logger.error(f"AI model error: {e}")
-            return generate_twiml_response(
-                "Sorry, the AI service is currently unavailable. Please try again later.",
-                status="error"
-            )
-
-        cleaned_response = clean_response(bot_response)
-        final_response, follow_up_question = add_conversational_elements(cleaned_response)
-
-        # Always generate audio response
-        external_send_message(
-            to_number=from_number,
-            body_text="🎯 Creating your response...",
-            message_type='whatsapp'
-        )
-
-        audio_filename = tts_service.generate_speech(final_response, from_number)
-        
-        # Send both text and audio responses
-        if audio_filename:
-            # Send text response first
-            text_result = external_send_message(
-                to_number=from_number,
-                body_text=final_response,
-                message_type='whatsapp'
-            )
-            
-            # Construct audio URL using configured base URL
-            audio_url = f"{app.config['BASE_URL']}/audio/{audio_filename}"
-            logger.info(f"Attempting to send audio with URL: {audio_url}")
-
-            # Verify audio file exists before sending
-            audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
-            if not os.path.exists(audio_path):
-                logger.error(f"Audio file not found at {audio_path}")
-                raise FileNotFoundError("Audio file not found")
-
-            # Send audio message
-            audio_result = twilio_client.messages.create(
-                from_='whatsapp:+14155238886',
-                to=from_number,
-                media_url=[audio_url]
-            )
-            
-            logger.info(f"Audio message sent successfully. SID: {audio_result.sid}")
-            status = 'sent_with_audio' if audio_result.sid else 'failed'
-        else:
-            # Fallback to text-only if audio generation fails
-            text_result = external_send_message(
-                to_number=from_number,
-                body_text=final_response,
-                message_type='whatsapp'
-            )
-            status = 'sent_text_only'
-
-        # Save conversation
-        save_conversation(
-            phone_number=from_number,
-            user_input=user_input,
-            bot_response=final_response,
-            response_time=response_time,
-            status=status
-        )
-
-        # Update session with new context and follow-up
-        conversation_manager.update_session(
-            from_number,
-            context=cleaned_response,
-            question=follow_up_question
-        )
-
         return Response("OK", status=200)
 
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}", exc_info=True)
-        return generate_twiml_response(
-            "Sorry, something went wrong. Please try again in a moment.",
-            status="error"
-        )
+        return Response("Server error", status=500)
 
 @app.route('/audio/<filename>')
 def serve_audio(filename):
+    """Serve audio files with proper headers and error handling"""
     try:
+        # Log the request for debugging
+        logger.info(f"🎵 Audio request received for: {filename}")
+        logger.info(f"📡 Request from: {request.remote_addr}")
+        logger.info(f"🔗 Full URL: {request.url}")
+        logger.info(f"📋 Request headers: {dict(request.headers)}")
+        
         safe_filename = os.path.basename(filename)
         audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', safe_filename)
         
+        logger.info(f"📁 Looking for audio file at: {audio_path}")
+        
         if os.path.exists(audio_path):
-            return send_file(
+            file_size = os.path.getsize(audio_path)
+            logger.info(f"✅ Audio file found, size: {file_size} bytes")
+            
+            # Set proper headers for audio streaming
+            response = send_file(
                 audio_path,
-                mimetype='audio/mpeg',  # Changed from audio/mp3 to audio/mpeg
-                as_attachment=False,     # Changed to False to allow direct playback
+                mimetype='audio/mpeg',
+                as_attachment=False,
                 download_name=safe_filename
             )
+            
+            # Add CORS headers for Twilio
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            response.headers['Content-Length'] = str(file_size)
+            
+            logger.info(f"✅ Successfully serving audio file: {safe_filename}")
+            logger.info(f"📊 Response headers: {dict(response.headers)}")
+            return response
         else:
-            logger.error(f"Audio file not found: {audio_path}")
-            return Response("Audio file not found", status=404)
+            logger.error(f"❌ Audio file not found: {audio_path}")
+            return Response("Audio file not found", status=404, mimetype='text/plain')
+            
     except Exception as e:
-        logger.error(f"Error serving audio: {e}")
-        return Response("Error serving audio", status=500)
+        logger.error(f"❌ Error serving audio {filename}: {e}", exc_info=True)
+        return Response(f"Error serving audio: {str(e)}", status=500, mimetype='text/plain')
+
+@app.route('/audio/<filename>', methods=['OPTIONS'])
+def audio_options(filename):
+    """Handle CORS preflight requests for audio files"""
+    response = Response()
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -491,6 +342,65 @@ def cleanup_old_audio_files():
                 logger.info(f"Cleaned up old audio file: {filename}")
             except Exception as e:
                 logger.error(f"Failed to remove old audio file {filename}: {e}")
+
+def send_paired_response(to_number, text_response, audio_filename):
+    """Send both text and audio responses as a pair"""
+    try:
+        logger.info(f"Starting paired response for {to_number}")
+        
+        # Send text response first
+        text_result = external_send_message(
+            to_number=to_number,
+            body_text=text_response,
+            message_type='whatsapp'
+        )
+        
+        logger.info(f"Text message sent successfully: {text_result}")
+        
+        # Prepare audio response
+        base_url = app.config['BASE_URL']
+        audio_url = f"{base_url}/audio/{audio_filename}"
+        audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
+        
+        logger.info(f"Audio URL: {audio_url}")
+        logger.info(f"Audio path: {audio_path}")
+        
+        # Verify audio file exists and has content
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Audio file not found at {audio_path}")
+        
+        file_size = os.path.getsize(audio_path)
+        if file_size == 0:
+            raise ValueError(f"Audio file is empty: {audio_path}")
+        
+        logger.info(f"Audio file verified: {file_size} bytes")
+        
+        # Test if the audio URL is accessible
+        try:
+            test_response = requests.head(audio_url, timeout=5)
+            logger.info(f"Audio URL accessibility test: {test_response.status_code}")
+            if test_response.status_code != 200:
+                logger.warning(f"Audio URL may not be accessible: {test_response.status_code}")
+        except Exception as e:
+            logger.warning(f"Could not test audio URL accessibility: {e}")
+        
+        # Send audio response
+        audio_result = twilio_client.messages.create(
+            from_='whatsapp:+14155238886',
+            to=to_number,
+            media_url=[audio_url]
+        )
+        
+        logger.info(f"Audio message sent successfully: {audio_result.sid}")
+        logger.info(f"Paired response completed. Text: {text_result}, Audio: {audio_result.sid}")
+        return True, 'sent_paired'
+        
+    except FileNotFoundError as e:
+        logger.error(f"Audio file not found: {e}")
+        return False, 'audio_file_missing'
+    except Exception as e:
+        logger.error(f"Failed to send paired response: {e}", exc_info=True)
+        return False, 'failed'
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
