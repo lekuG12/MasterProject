@@ -92,7 +92,8 @@ os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
 def clean_response(text):
     """
     Cleans the raw AI model output by intelligently parsing multi-line
-    diagnosis and first-aid sections.
+    diagnosis and first-aid sections, removing duplicates and gibberish,
+    and ensuring diagnosis does not contain first-aid instructions.
     """
     logger.info(f"Cleaning raw response: \"{text[:200]}...\"")
 
@@ -106,59 +107,75 @@ def clean_response(text):
     first_aid_lines = []
     current_section = None
 
+    # Keywords that indicate first-aid advice
+    first_aid_keywords = [
+        "rest", "hydration", "paracetamol", "monitor", "seek medical", "evaluation",
+        "raise head", "saline", "keep warm", "offer fluids", "cool environment",
+        "sponge", "ors", "lay flat", "elevated", "urgent care", "nasal drops", "spray"
+    ]
+
     for line in lines:
-        # First, clean up any residual double spaces from the initial regex
         line = re.sub(r'\s{2,}', ' ', line).strip()
         if not line:
             continue
 
         if line.lower().startswith("diagnosis:"):
             current_section = "diagnosis"
-            # Add the text after the keyword
             diag_text = line.split(":", 1)[1].strip()
             if diag_text:
                 diagnosis_lines.append(diag_text)
             continue
         elif line.lower().startswith("first aid:"):
             current_section = "first_aid"
-            # Add the text after the keyword
             aid_text = line.split(":", 1)[1].strip()
             if aid_text:
                 first_aid_lines.append(aid_text)
             continue
-        
-        # Append line to the current section if it's a continuation
+
         if current_section == "diagnosis":
-            diagnosis_lines.append(line)
+            # Exclude lines that look like first-aid advice
+            if not any(kw in line.lower() for kw in first_aid_keywords):
+                diagnosis_lines.append(line)
         elif current_section == "first_aid":
             first_aid_lines.append(line)
         elif current_section is None:
-            # If we haven't found a section yet, assume it's part of the diagnosis
-            diagnosis_lines.append(line)
+            # Only add to diagnosis if not first-aid advice
+            if not any(kw in line.lower() for kw in first_aid_keywords):
+                diagnosis_lines.append(line)
 
-    # 3. Process the collected lines
-    # Join multi-line diagnosis
-    if diagnosis_lines:
-        full_diagnosis = " ".join(diagnosis_lines)
-    else:
-        full_diagnosis = "No specific diagnosis provided. Please describe the symptoms."
+    # 3. Process diagnosis
+    full_diagnosis = " ".join(diagnosis_lines) if diagnosis_lines else "No specific diagnosis provided. Please describe the symptoms."
 
-    # De-duplicate first aid steps
+    # 4. Clean first aid steps
     unique_steps = []
     seen_steps = set()
+    emergency_added = False
     for step in first_aid_lines:
-        if step and step.lower() not in seen_steps:
+        # Remove gibberish (repeated 'ptoms', etc.)
+        if re.search(r'(ptoms){2,}', step.lower()):
+            continue
+        # Normalize step for deduplication
+        norm_step = step.lower().strip('.')
+        # Only keep one emergency response
+        if any(kw in norm_step for kw in [
+            "seek emergency care", "urgent care", "seek emergency medical care", "seek medical evaluation"
+        ]):
+            if not emergency_added:
+                unique_steps.append("Seek medical evaluation immediately.")
+                emergency_added = True
+            continue
+        # Deduplicate
+        if norm_step not in seen_steps and len(step) > 3:
             unique_steps.append(step)
-            seen_steps.add(step.lower())
-            
-    # 4. Assemble the final response
+            seen_steps.add(norm_step)
+
+    # 5. Assemble the final response
     cleaned_text = f"*Diagnosis*:\n{full_diagnosis}"
-    
     if unique_steps:
         cleaned_text += "\n\n*First Aid Steps*:"
         for step in unique_steps:
             cleaned_text += f"\n• {step}"
-            
+
     logger.info(f"Cleaned response: \"{cleaned_text[:200]}...\"")
     return cleaned_text
 
