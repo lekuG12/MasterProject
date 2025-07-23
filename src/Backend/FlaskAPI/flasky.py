@@ -56,7 +56,7 @@ def get_ngrok_url():
         return None
 
 # Configure BASE_URL - use the provided ngrok URL directly
-base_url = 'https://ab5a-129-0-79-136.ngrok-free.app'
+base_url = 'https://394e41f97a55.ngrok-free.app'
 logger.info(f"Using ngrok URL: {base_url}")
 
 app.config['BASE_URL'] = base_url
@@ -200,8 +200,36 @@ def whatsapp_webhook():
     logger.info("--- Webhook request received ---")
     try:
         from_number = request.form.get('From', '')
-        user_input = request.form.get('Body', '').strip()
+        user_input = request.form.get('Body', '').strip() if request.form.get('Body') else None
 
+        # If no text, check for audio
+        if not user_input:
+            num_media = int(request.form.get('NumMedia', 0))
+            if num_media > 0 and request.form.get('MediaContentType0', '').startswith('audio/'):
+                media_url = request.form.get('MediaUrl0')
+                content_type = request.form.get('MediaContentType0')
+                logger.info(f"Audio message detected. Media URL: {media_url}, Content-Type: {content_type}")
+                # Download and transcribe audio
+                temp_audio_path = os.path.join(app.config['STATIC_FOLDER'], 'temp', f"input_{from_number.replace('+','')}.ogg")
+                try:
+                    if not tts_service.download_audio_from_url(media_url, temp_audio_path):
+                        logger.error("Failed to download audio file.")
+                        external_send_message(from_number, "Sorry, I couldn't download your audio message.")
+                        return Response("OK", status=200)
+                    user_input = tts_service.transcribe_audio(temp_audio_path)
+                    logger.info(f"[AUDIO->TEXT] Transcribed audio to text: '{user_input}'")
+                    logger.info(f"Transcribed audio to: {user_input}")
+                except Exception as e:
+                    logger.error(f"Audio processing failed: {e}")
+                    external_send_message(from_number, "Sorry, I couldn't process your audio message.")
+                    return Response("OK", status=200)
+                finally:
+                    if os.path.exists(temp_audio_path):
+                        os.remove(temp_audio_path)
+            else:
+                logger.warning("Request missing From or Body or valid audio. Aborting.")
+                return Response("Request incomplete", status=400)
+        
         if not from_number or not user_input:
             logger.warning("Request missing From or Body. Aborting.")
             return Response("Request incomplete", status=400)
@@ -209,33 +237,84 @@ def whatsapp_webhook():
         session_state = get_conversation_state(from_number)
         logger.info(f"User {from_number} is in state: {session_state.type.name}")
 
+        # Respond to greetings before any state logic
+        if UserIntent.is_greeting(user_input):
+            external_send_message(
+                to_number=from_number,
+                body_text="Hello! Please describe your child's symptoms and I'll help you with a diagnosis and first aid advice."
+            )
+            return Response("OK", status=200)
+
         # --- State Machine Logic ---
         if session_state.type == ConversationStateType.COLLECTING_SYMPTOMS:
             if UserIntent.is_negative(user_input):
                 symptom_summary = session_state.get_all_symptoms()
                 logger.info(f"User finished. Generating diagnosis for: '{symptom_summary}'")
                 
-                if not symptom_summary:
-                    external_send_message(from_number, "Please describe the symptoms first.")
+                if not symptom_summary.strip():
+                    external_send_message(from_number, "Please describe at least one symptom before I can help.")
                     session_state.reset()
                     return Response("OK", status=200)
 
-                bot_response, _ = get_ai_response(symptom_summary)
-                cleaned_response = clean_response(bot_response)
+                try:
+                    bot_response, _ = get_ai_response(symptom_summary)
+                    logger.info(f"Raw model output: {bot_response}")
+                except Exception as e:
+                    logger.error(f"Model generation failed: {e}")
+                    external_send_message(from_number, "Sorry, I couldn't generate a diagnosis at this time.")
+                    session_state.reset()
+                    return Response("OK", status=200)
+
+                try:
+                    cleaned_response = clean_response(bot_response)
+                    logger.info(f"Cleaned response: {cleaned_response}")
+                except Exception as e:
+                    logger.error(f"Response cleaning failed: {e}")
+                    external_send_message(from_number, "Sorry, I couldn't process the diagnosis output.")
+                    session_state.reset()
+                    return Response("OK", status=200)
 
                 logger.info("Sending final diagnosis text and audio...")
-                audio_filename = tts_service.generate_speech(cleaned_response, from_number)
-                if audio_filename:
-                    send_paired_response(from_number, cleaned_response, audio_filename)
-                else:
+                try:
+                    audio_filename = tts_service.generate_speech(cleaned_response, from_number)
+                    if audio_filename:
+                        audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
+                        if os.path.exists(audio_path):
+                            logger.info(f"Audio file generated: {audio_path} ({os.path.getsize(audio_path)} bytes)")
+                        else:
+                            logger.error(f"Audio file {audio_path} does not exist after generation!")
+                    else:
+                        logger.error("Audio filename is None after generation!")
+                except Exception as e:
+                    logger.error(f"Audio generation failed: {e}")
+                    audio_filename = None
+
+                # Try to send both text and audio, fallback to text if audio fails
+                try:
+                    if audio_filename and os.path.exists(os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)):
+                        logger.info("Attempting to send paired text and audio response...")
+                        success, status = send_paired_response(from_number, cleaned_response, audio_filename)
+                        logger.info(f"send_paired_response returned: success={success}, status={status}")
+                        if not success:
+                            logger.warning("Paired response failed, falling back to text-only.")
+                            external_send_message(from_number, cleaned_response)
+                    else:
+                        logger.warning("Audio not available, sending text-only response.")
+                        external_send_message(from_number, cleaned_response)
+                except Exception as e:
+                    logger.error(f"Sending response failed: {e}")
                     external_send_message(from_number, cleaned_response)
                 
                 session_state.reset()
                 logger.info(f"Conversation for {from_number} has been reset.")
+                return Response("OK", status=200)
             else:
                 session_state.add_symptom(user_input)
                 logger.info(f"Added new symptom. History: {session_state.symptom_history}")
-                external_send_message(to_number=from_number, body_text="Got it. Anything else to add?")
+                external_send_message(
+                    to_number=from_number,
+                    body_text="Got it. If you’re finished listing symptoms, reply with ‘no’ or ‘that’s all’. Otherwise, add more symptoms."
+                )
         else: # GREETING state
             session_state.reset()
             session_state.add_symptom(user_input)
@@ -344,60 +423,44 @@ def cleanup_old_audio_files():
                 logger.error(f"Failed to remove old audio file {filename}: {e}")
 
 def send_paired_response(to_number, text_response, audio_filename):
-    """Send both text and audio responses as a pair"""
+    """Send both text and audio responses as a pair, with robust logging."""
     try:
         logger.info(f"Starting paired response for {to_number}")
-        
         # Send text response first
         text_result = external_send_message(
             to_number=to_number,
             body_text=text_response,
             message_type='whatsapp'
         )
-        
         logger.info(f"Text message sent successfully: {text_result}")
-        
         # Prepare audio response
         base_url = app.config['BASE_URL']
         audio_url = f"{base_url}/audio/{audio_filename}"
         audio_path = os.path.join(app.config['STATIC_FOLDER'], 'audio', audio_filename)
-        
         logger.info(f"Audio URL: {audio_url}")
         logger.info(f"Audio path: {audio_path}")
-        
         # Verify audio file exists and has content
         if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found at {audio_path}")
-        
+            logger.error(f"Audio file not found at {audio_path}")
+            return False, 'audio_file_missing'
         file_size = os.path.getsize(audio_path)
         if file_size == 0:
-            raise ValueError(f"Audio file is empty: {audio_path}")
-        
+            logger.error(f"Audio file is empty: {audio_path}")
+            return False, 'audio_file_empty'
         logger.info(f"Audio file verified: {file_size} bytes")
-        
-        # Test if the audio URL is accessible
-        try:
-            test_response = requests.head(audio_url, timeout=5)
-            logger.info(f"Audio URL accessibility test: {test_response.status_code}")
-            if test_response.status_code != 200:
-                logger.warning(f"Audio URL may not be accessible: {test_response.status_code}")
-        except Exception as e:
-            logger.warning(f"Could not test audio URL accessibility: {e}")
-        
         # Send audio response
-        audio_result = twilio_client.messages.create(
-            from_='whatsapp:+14155238886',
-            to=to_number,
-            media_url=[audio_url]
-        )
-        
-        logger.info(f"Audio message sent successfully: {audio_result.sid}")
-        logger.info(f"Paired response completed. Text: {text_result}, Audio: {audio_result.sid}")
-        return True, 'sent_paired'
-        
-    except FileNotFoundError as e:
-        logger.error(f"Audio file not found: {e}")
-        return False, 'audio_file_missing'
+        try:
+            audio_result = twilio_client.messages.create(
+                from_='whatsapp:+14155238886',
+                to=to_number,
+                media_url=[audio_url]
+            )
+            logger.info(f"Audio message sent successfully: {audio_result.sid}")
+            logger.info(f"Paired response completed. Text: {text_result}, Audio: {audio_result.sid}")
+            return True, 'sent_paired'
+        except Exception as e:
+            logger.error(f"Failed to send audio message: {e}")
+            return False, 'audio_send_failed'
     except Exception as e:
         logger.error(f"Failed to send paired response: {e}", exc_info=True)
         return False, 'failed'

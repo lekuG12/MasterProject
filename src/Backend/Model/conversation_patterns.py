@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import re
 
 class UserIntent:
     """A simple utility to determine user intent from short, conversational messages."""
@@ -7,7 +8,10 @@ class UserIntent:
     AFFIRMATIVE_WORDS = {'yes', 'yep', 'ya', 'sure', 'ok', 'absolutely', 'correct'}
     
     # Words indicating the user is finished providing symptoms
-    NEGATIVE_WORDS = {'no', 'nope', 'nah', 'thats all', "that's all", 'done', 'finished'}
+    NEGATIVE_WORDS = {'no', 'nope', 'nah', 'thats all', "that's all", 'done', 'finished', 'no thank you', 'nothing else', 'that is all', 'no more'}
+
+    # Words indicating a greeting
+    GREETING_WORDS = {'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'greetings'}
 
     @staticmethod
     def is_negative(message: str) -> bool:
@@ -15,7 +19,25 @@ class UserIntent:
         Checks if the user's message indicates they are finished adding symptoms.
         Returns True if the user says "no", "that's all", etc.
         """
-        return message.lower().strip() in UserIntent.NEGATIVE_WORDS
+        msg = message.lower().strip()
+        msg = re.sub(r'[^a-z\s]', '', msg)  # Remove punctuation
+        for word in UserIntent.NEGATIVE_WORDS:
+            if word in msg:
+                return True
+        return False
+
+    @staticmethod
+    def is_greeting(message: str) -> bool:
+        """
+        Checks if the user's message is a greeting.
+        Returns True if the message is a greeting word.
+        """
+        msg = message.lower().strip()
+        # Only match whole words using regex word boundaries
+        for greet in UserIntent.GREETING_WORDS:
+            if re.search(rf'\b{re.escape(greet)}\b', msg):
+                return True
+        return False
 
 class ConversationManager:
     def __init__(self):
