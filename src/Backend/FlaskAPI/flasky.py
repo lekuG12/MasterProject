@@ -111,7 +111,8 @@ def clean_response(text):
     first_aid_keywords = [
         "rest", "hydration", "paracetamol", "monitor", "seek medical", "evaluation",
         "raise head", "saline", "keep warm", "offer fluids", "cool environment",
-        "sponge", "ors", "lay flat", "elevated", "urgent care", "nasal drops", "spray"
+        "sponge", "ors", "lay flat", "elevated", "urgent care", "nasal drops", "spray",
+        "call emergency", "transfusion", "fluids", "burped"
     ]
 
     for line in lines:
@@ -143,33 +144,37 @@ def clean_response(text):
             if not any(kw in line.lower() for kw in first_aid_keywords):
                 diagnosis_lines.append(line)
 
-    # 3. Process diagnosis
-    full_diagnosis = " ".join(diagnosis_lines) if diagnosis_lines else "No specific diagnosis provided. Please describe the symptoms."
+    # Deduplicate diagnosis lines
+    deduped_diag = []
+    seen_diag = set()
+    for diag in diagnosis_lines:
+        norm_diag = diag.lower().strip('.')
+        if norm_diag not in seen_diag and len(diag) > 3:
+            deduped_diag.append(diag)
+            seen_diag.add(norm_diag)
 
-    # 4. Clean first aid steps
+    full_diagnosis = " ".join(deduped_diag) if deduped_diag else "No specific diagnosis provided. Please describe the symptoms."
+
+    # Clean first aid steps
     unique_steps = []
     seen_steps = set()
     emergency_added = False
     for step in first_aid_lines:
-        # Remove gibberish (repeated 'ptoms', etc.)
         if re.search(r'(ptoms){2,}', step.lower()):
             continue
-        # Normalize step for deduplication
         norm_step = step.lower().strip('.')
-        # Only keep one emergency response
         if any(kw in norm_step for kw in [
-            "seek emergency care", "urgent care", "seek emergency medical care", "seek medical evaluation"
+            "seek emergency care", "urgent care", "seek emergency medical care", "seek medical evaluation", "call emergency"
         ]):
             if not emergency_added:
-                unique_steps.append("Seek medical evaluation immediately.")
+                unique_steps.append("Seek emergency medical care immediately.")
                 emergency_added = True
             continue
-        # Deduplicate
         if norm_step not in seen_steps and len(step) > 3:
             unique_steps.append(step)
             seen_steps.add(norm_step)
 
-    # 5. Assemble the final response
+    # Assemble the final response
     cleaned_text = f"*Diagnosis*:\n{full_diagnosis}"
     if unique_steps:
         cleaned_text += "\n\n*First Aid Steps*:"
